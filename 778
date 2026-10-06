@@ -1,0 +1,4824 @@
+--[[ ========================================================================
+ 美化菜单 v22 · 皮肤浏览器 + 视角模型 + 透明外观替换 + 摄像机 + 世界滤镜 + 天空盒 + 第三人称手持
+ 页面：标签「美化」→ 皮肤库 / 已选预览 / 删除 / 自定义视角模型 / 透明外观替换
+       标签「玩家」→ 摄像机功能 + 第三人称手持模型
+       标签「世界」→ 世界滤镜 + 天空盒
+       标签「界面设置」→ 菜单 + 主题 + 配置（手动保存/加载皮肤数据）
+ v22 新增 / 改动：
+   - 观战状态机：进入观战 → 硬还原 + 停写 + 恢复 Highlight；退出自动恢复
+   - 6.11 整段重写：工厂 GetCharacterModel(name,"Stock") → 抄远程玩家焊点 → 滑块兜底
+   - 6.12 天空盒：6 面贴图 + 日月贴图 + 星星数 + 天体开关 + 探测 + 还原
+   - 顶部补 isSpectating()（供 6.8 / 6.9 / 6.11 共用）
+ v21 保留：C4 外观不再碰 C4 自带手臂/手套；第三人称手持模型
+ v20 保留：世界滤镜（Lighting + Atmosphere）
+ v19 保留：分节 do ... end 修复 200 局部变量上限
+ 控制台备用：
+   getgenv().SkinInstallHooks() / getgenv().SkinUninstallHooks() / getgenv().SkinDebugLog(20)
+   getgenv().ViewModelCleanup()   -- 还原视角模型
+   getgenv().AppearanceCleanup()  -- 还原外观替换
+   getgenv().CameraCleanup()      -- 还原第三人称 / 宽比高 / FOV / 透明度
+   getgenv().WorldCleanup()       -- 还原世界滤镜
+   getgenv().WorldReport()        -- 世界滤镜当前值 / 原始值
+   getgenv().SkyCleanup()         -- 还原天空盒
+   getgenv().SkyReport()          -- 天空盒当前状态
+   getgenv().SkyProbe()           -- 列出 Lighting 与 RS.Assets.Lighting
+   getgenv().TPWeaponCleanup()    -- 清掉第三人称手持模型
+   getgenv().TPWeaponStatus()     -- 手持模型状态
+   getgenv().TPWeaponProbe()      -- 探测游戏原生手持武器偏移
+   getgenv().AppearanceReport()   -- 生效部件 + Highlight + C4 命中
+   getgenv().C4Probe()            -- C4 路径探测
+============================================================================ ]]
+
+if getgenv().BeautifyMenuLoaded then
+	local _oldLib = getgenv().Linoria
+	if _oldLib and type(_oldLib.Unload) == "function" then
+		pcall(function() _oldLib:Unload() end)
+	end
+end
+getgenv().BeautifyMenuLoaded = true
+
+--// 1. 加载 UI 库
+local repo = "https://raw.githubusercontent.com/kuqidexiaohai-ops/kuqidexaiohaiLuauScript/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.luau"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.luau"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.luau"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ShowToggleFrameInKeybinds = true
+Library.ShowCustomCursor = true
+Library.NotifySide = "Left"
+
+--// 2. 窗口
+local Window = Library:CreateWindow({
+	Title = "美化菜单",
+	Center = true,
+	AutoShow = true,
+	Resizable = true,
+	ShowCustomCursor = true,
+	UnlockMouseWhileOpen = true,
+	NotifySide = "Left",
+	TabPadding = 8,
+	MenuFadeTime = 0.2,
+})
+
+local Tabs = {
+	Beautify = Window:AddTab("美化"),
+	Player = Window:AddTab("玩家"),
+	World = Window:AddTab("世界"),
+	Settings = Window:AddTab("界面设置"),
+}
+
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local LP = Players.LocalPlayer
+
+--// ======================== 3. 数据层 ========================
+local AttrData, AssetsRoot = nil, nil
+
+local KNIVES = {
+	{ name = "Karambit",        icon = "rbxassetid://82907878723922" },
+	{ name = "M9 Bayonet",      icon = "rbxassetid://114729507457381" },
+	{ name = "Flip Knife",      icon = "rbxassetid://114406663788910" },
+	{ name = "Stiletto Knife",  icon = "rbxassetid://71577885407500" },
+	{ name = "Butterfly Knife", icon = "rbxassetid://84468069917481" },
+	{ name = "Skeleton Knife",  icon = "rbxassetid://96909576027112" },
+	{ name = "Gut Knife",       icon = "rbxassetid://83563180039816" },
+	{ name = "LightSaber",      icon = nil },
+}
+
+local KNIFE_NAME_SET = {}
+for _, k in ipairs(KNIVES) do
+	KNIFE_NAME_SET[k.name] = true
+end
+
+local KNIFE_DEFAULT_SKIN = { ["LightSaber"] = "Ren" }
+local KNIFE_GROUP_ICON = "rbxassetid://96868141739315"
+
+local GLOVE_ICON = "rbxassetid://115310643323427"
+local GLOVE_TYPES = { "Sports Gloves", "Driver Gloves", "Hand Wraps", "Operator Gloves" }
+local GLOVE_TYPE_EXCLUDE = { ["T Glove"] = true, ["CT Glove"] = true }
+local GloveTypeOrder = {}
+
+local CATEGORIES = {
+	{ id = "glock18",      label = "Glock-18",      kind = "gun", weapon = "Glock-18",      icon = "rbxassetid://103206109634679" },
+	{ id = "usps",         label = "USP-S",         kind = "gun", weapon = "USP-S",         icon = "rbxassetid://108831167850928" },
+	{ id = "p250",         label = "P250",          kind = "gun", weapon = "P250",          icon = "rbxassetid://119752198454013" },
+	{ id = "fiveseven",    label = "Five-SeveN",    kind = "gun", weapon = "Five-SeveN",    icon = "rbxassetid://81698670085410" },
+	{ id = "tec9",         label = "Tec-9",         kind = "gun", weapon = "Tec-9",         icon = "rbxassetid://103535879159128" },
+	{ id = "dualbarettas", label = "Dual Berettas", kind = "gun", weapon = "Dual Berettas", icon = "rbxassetid://103853751877652" },
+	{ id = "deserteagle",  label = "Desert Eagle",  kind = "gun", weapon = "Desert Eagle",  icon = "rbxassetid://139948369384565" },
+	{ id = "r8revolver",   label = "R8 Revolver",   kind = "gun", weapon = "R8 Revolver",   icon = "rbxassetid://101594475858456" },
+	{ id = "mac10",        label = "MAC-10",        kind = "gun", weapon = "MAC-10",        icon = "rbxassetid://78958784545063" },
+	{ id = "mp9",          label = "MP9",           kind = "gun", weapon = "MP9",           icon = "rbxassetid://80128845111227" },
+	{ id = "p90",          label = "P90",           kind = "gun", weapon = "P90",           icon = "rbxassetid://137591842393094" },
+	{ id = "nova",         label = "Nova",          kind = "gun", weapon = "Nova",          icon = "rbxassetid://139999346390524" },
+	{ id = "xm1014",       label = "XM1014",        kind = "gun", weapon = "XM1014",        icon = "rbxassetid://80234588113521" },
+	{ id = "mag7",         label = "MAG-7",         kind = "gun", weapon = "MAG-7",         icon = "rbxassetid://100038814759724" },
+	{ id = "sawedoff",     label = "Sawed-Off",     kind = "gun", weapon = "Sawed-Off",     icon = "rbxassetid://131128504842218" },
+	{ id = "negev",        label = "Negev",         kind = "gun", weapon = "Negev",         icon = "rbxassetid://90582975712230" },
+	{ id = "ak47",         label = "AK-47",         kind = "gun", weapon = "AK-47",         icon = "rbxassetid://122613466279170" },
+	{ id = "m4a4",         label = "M4A4",          kind = "gun", weapon = "M4A4",          icon = "rbxassetid://88699722017830" },
+	{ id = "m4a1s",        label = "M4A1-S",        kind = "gun", weapon = "M4A1-S",        icon = "rbxassetid://112569776588537" },
+	{ id = "famas",        label = "FAMAS",         kind = "gun", weapon = "FAMAS",         icon = "rbxassetid://102210032007604" },
+	{ id = "galilar",      label = "Galil AR",      kind = "gun", weapon = "Galil AR",      icon = "rbxassetid://131473149747361" },
+	{ id = "aug",          label = "AUG",           kind = "gun", weapon = "AUG",           icon = "rbxassetid://90575765410470" },
+	{ id = "sg553",        label = "SG 553",        kind = "gun", weapon = "SG 553",        icon = "rbxassetid://121020346295718" },
+	{ id = "awp",          label = "AWP",           kind = "gun", weapon = "AWP",           icon = "rbxassetid://106381346822905" },
+	{ id = "ssg08",        label = "SSG 08",        kind = "gun", weapon = "SSG 08",        icon = "rbxassetid://138912757184897" },
+	{ id = "zeus",         label = "Zeus x27",      kind = "gun", weapon = "Zeus x27",      icon = "rbxassetid://132815946459334" },
+}
+
+local FALLBACK_GUNS = {
+	["AK-47"] = { {"Midas","93758402379471"},{"Sakura","129248865691768"},{"Red Baron","100333275604292"},{"Luminex","106261473595060"},{"Aniki","79165418130003"},{"PinPoint","77784581804635"},{"Lore"},{"Rebellion"},{"Sovapid"} },
+	["M4A1-S"] = { {"SuperSoaked","103772900251932"},{"Retro","81145336779302"},{"Phaseprint","86193535413500"},{"Orchids","90728486920409"},{"BlackOps","100395479622623"},{"Anodized Red","131879735241917"},{"Bloggd"},{"Castroil"} },
+	["AWP"] = { {"Typhon","122995192815975"},{"Tekko","85574232028372"},{"Railgun","81400648966470"},{"Overdrive","83295850359191"},{"High Octane","115690703667451"},{"Bird Hunt","125588102903302"},{"Beta","118594988926379"},{"Freedom"},{"HexPop"},{"Koi Pond"},{"Lore"},{"Metamorphosis"} },
+	["FAMAS"] = { {"Wallpaper","126728063218889"},{"Mind","84937518157338"},{"Medic","73556930212100"},{"Heirloom","93118742324373"},{"Arctic Camo","74811856734421"} },
+	["SSG 08"] = { {"Racer8","127712172099348"},{"Prototype","103293410085218"},{"Onyx","89819097332207"},{"Mindspill","126450245164016"},{"Labyrinth","124277812129093"},{"Desert Strike","113048341513993"},{"GutterFreak"} },
+	["M4A4"] = { {"Wrapped","79976075643573"},{"The Ambassador","82194333419976"},{"Tekko","102614504155458"},{"Ignition","93337408915421"},{"BubblePop","98519782954693"},{"B-Hop","107052741635853"},{"Freedom"},{"Hero of Hell"} },
+	["Dual Berettas"] = { {"Vernal","94718859658853"},{"Tension","120194364051679"},{"Overclock","103617250154345"},{"Inked","131507197474545"},{"Gilded","71813593655301"},{"Choking Hazard","116004668899318"} },
+	["Galil AR"] = { {"Monochrome","107215991689244"},{"Limewire","135905701387256"},{"Irradiated","118380098463904"},{"Irid","79356697498606"},{"Feral","73716554537684"} },
+	["R8 Revolver"] = { {"Warui","72251293243669"},{"Bloody8","91172241700841"},{"Heatseeka"},{"Regalia"} },
+	["Desert Eagle"] = { {"Velocity","75834688737733"},{"Turbo","75214384714270"},{"Spectrum","82218805914551"},{"Racer8","75758790429953"},{"Permafrost","137719337097057"},{"Paranoia","127720679390903"},{"Mercy","107871193518922"},{"High Octane","118839210332863"},{"Circuit","83763717166776"},{"Bronze Elite"},{"Freedom"},{"Hero of Hell"},{"Lore"},{"Punk"} },
+	["USP-S"] = { {"Tekko","79262521332403"},{"SuperSoaked","98779764931541"},{"SpecOps","73891797489514"},{"Heated","89109055678729"},{"Ajax","124476320820787"},{"Luminex"},{"Tora"},{"Wintergreen"} },
+	["Glock-18"] = { {"PinPoint","135793626617144"},{"Midas","109022773367798"},{"Fuji","96483145772571"},{"Fade","133289113149929"},{"Broken Tv","125080807345616"},{"Aurora","110209670886154"},{"Canvas"},{"Hero of Hell"},{"Yurei"} },
+	["AUG"] = { {"Anodized Red"},{"Hero of Hell"},{"Hot Rod"},{"Overgrowth"},{"Predator"},{"Tension"} },
+	["Five-SeveN"] = { {"Control"},{"Icecap"},{"Mk II"},{"NoMercy"},{"X-Ray"} },
+	["MAC-10"] = { {"Air Mail"},{"Daisies"},{"Ivory"},{"Midas"},{"Nailgun"},{"NGRAM"},{"Parcel"} },
+	["MAG-7"] = { {"Ambulance"},{"Vision7"} },
+	["MP9"] = { {"Anodized Red"},{"Canyon"},{"Choke Oil"},{"Classified"},{"Graffiti"},{"Hibiki"},{"High Octane"},{"Paranoia"},{"Patina"},{"X-Ray"} },
+	["Negev"] = { {"Frostbloom"},{"Noctiflora"},{"Rotary Power"},{"The Jungle"} },
+	["Nova"] = { {"Arctic Stripe"},{"Flutter"},{"Half+One"},{"Heat"},{"Huntsman"},{"Mecha"},{"Slime"} },
+	["P250"] = { {"B-250"},{"Frutiger Aero"},{"Glacial"},{"Mindspill"},{"Pulse"},{"Zen"} },
+	["P90"] = { {"Big Cat"},{"Chromatic"},{"Database"},{"DRFT"},{"PinPoint"},{"Synthwave"},{"Visions"} },
+	["SG 553"] = { {"Cryo"},{"Dynasty"},{"Frostline"} },
+	["Sawed-Off"] = { {"Improvised"},{"Memento"},{"Orbit"},{"Panthera"},{"SuperSoaked"} },
+	["Tec-9"] = { {"Doodle"},{"Medal.tv"},{"Monarch"},{"Striker"},{"Timeless"},{"Trajectory"},{"Vice"} },
+	["XM1014"] = { {"Abstract"},{"BloxoBlasto"},{"Koi"},{"Lilies"},{"Office"},{"Splatter"} },
+	["Zeus x27"] = { {"BitFyre"},{"MedScan"},{"Overcharge"},{"Viperized"} },
+}
+
+local FALLBACK_KNIVES = {
+	["Karambit"] = {
+		{"Aurora","113750004793967"},{"Blackwidow"},{"Damascus","120144231261906"},{"Doodle"},
+		{"Fade","132543437940378"},{"Frostbite","123447040169667"},{"Midnight","80763136393591"},
+		{"Naval"},{"Noir","108497388500011"},{"Rusted"},{"Safari"},{"Scarlet","117216240536029"},
+		{"Tiger Stripes","71370484752060"},{"Vanilla"},{"Violet"},{"Wemby"},{"Whiteout","82334355963706"},{"Woodland"},
+	},
+	["M9 Bayonet"] = {
+		{"Blackwidow"},{"Damascus"},{"Doodle"},{"Fade","78742419491563"},{"Midnight","91092197123629"},
+		{"Naval"},{"Rusted"},{"Safari"},{"Scarlet","132078898068163"},{"Tiger Stripes","125312157263724"},
+		{"Vanilla"},{"Violet","106967914785340"},{"Whiteout","72592920992661"},{"Woodland"},
+	},
+	["Flip Knife"] = {
+		{"Aurora","107603334400510"},{"Blackwidow"},{"Damascus"},{"Doodle"},{"Fade","131986775283604"},
+		{"Frostbite","78907946895719"},{"Midnight","136473561078704"},{"Naval"},{"Noir","106311577861315"},
+		{"Rusted"},{"Safari","103612553827666"},{"Scarlet","127959156445369"},{"Tiger Stripes","92519663294336"},
+		{"Vanilla"},{"Violet"},{"Whiteout","130164507735326"},{"Woodland"},
+	},
+	["Stiletto Knife"] = {
+		{"Blackwidow"},{"Damascus"},{"Doodle"},{"Fade","91048445367762"},{"Midnight","77394651362724"},
+		{"Naval"},{"Rusted"},{"Safari"},{"Scarlet","110060359373367"},{"Tiger Stripes","116552571639671"},
+		{"Vanilla"},{"Violet"},{"Whiteout","127072648843065"},{"Woodland"},
+	},
+	["Butterfly Knife"] = {
+		{"Blackwidow"},{"Damascus"},{"Doodle"},{"Fade","111287462193987"},{"Lebron James"},
+		{"Midnight","88865925934283"},{"Naval"},{"Rusted"},{"Safari","123190091670437"},{"Scarlet","87017491344468"},
+		{"Tiger Stripes","96659966051216"},{"Vanilla"},{"Violet","79300005192646"},{"Whiteout","110113000224373"},{"Woodland"},
+	},
+	["Skeleton Knife"] = {
+		{"Blackwidow"},{"Fade","118359721200326"},{"Midnight","133923596334039"},{"Naval"},{"Safari"},
+		{"Scarlet","103251681352012"},{"Vanilla"},{"Violet","127909377446043"},{"Whiteout","124594244224619"},{"Woodland"},
+	},
+	["Gut Knife"] = {
+		{"Aurora","118691372743231"},{"Blackwidow"},{"Damascus"},{"Doodle"},{"Fade","100099630858434"},
+		{"Frostbite","94735794140831"},{"Midnight","128047568390717"},{"Naval"},{"Noir","116282773180540"},
+		{"Rusted"},{"Safari"},{"Scarlet","95174624177505"},{"Tiger Stripes","90574007773663"},{"Vanilla"},
+		{"Violet"},{"Whiteout","103026988088014"},{"Woodland"},
+	},
+	["LightSaber"] = { {"Ren"} },
+}
+
+local function addPatternRange(list, prefix, from, to, skip)
+	if not list then return end
+	for i = from, to do
+		if i ~= skip then
+			table.insert(list, { prefix .. i })
+		end
+	end
+end
+for _, k in ipairs({ "Karambit", "M9 Bayonet", "Butterfly Knife" }) do
+	addPatternRange(FALLBACK_KNIVES[k], "Nebula_PATTERN_", 1, 11)
+	addPatternRange(FALLBACK_KNIVES[k], "Viridian_PATTERN_", 1, 9)
+end
+addPatternRange(FALLBACK_KNIVES["Gut Knife"], "Nebula_PATTERN_", 1, 11)
+addPatternRange(FALLBACK_KNIVES["Gut Knife"], "Viridian_PATTERN_", 1, 9, 7)
+
+local FALLBACK_GLOVES = {
+	["Sports Gloves"] = { {"Blackout","114088813830068"},{"Freshmint","86209384833013"},{"Bumblebee","112680995725951"},{"Racer","113809907046108"},{"Labyrinth","92411404814491"},{"Malibu","84460121237207"},{"The Ambassador","77494194625324"},{"Tidal","92271195792490"},{"Imperial","114841890691458"},{"Dune"},{"Hunter"} },
+	["Driver Gloves"] = { {"Snow Leopard","124866087889693"},{"Cardinal"},{"Cardinal Weave"},{"Cobra"},{"Gator"},{"Leopard"},{"Midnight Weave"},{"Nomad"},{"Tartan"},{"Tuxedo"} },
+	["Hand Wraps"] = { {"Bandage","131013387547439"},{"Aztec"},{"Camouflage"},{"Carpet"},{"Checkers"},{"Crime Scene"},{"Hunter"},{"Meander"},{"Snakeskin"},{"Taped"} },
+	["Operator Gloves"] = { {"Fade","123448009418064"},{"Emerald Widow","113241850928617"},{"Hellwire","140102369055407"},{"Agent"},{"Amber Fade"},{"Black Widow"},{"Bumblebee"},{"Hunter"},{"Reinforced"},{"Smoke"} },
+}
+
+local SKIP_GUN_SKINS = { stock = true }
+local SKIP_GLOVE_SKINS = { stock = true, vanilla = true }
+
+local Catalog = { KnifeEntries = {}, GunEntries = {}, GloveTypeEntries = {} }
+
+local function normId(id)
+	id = tostring(id)
+	if id:match("^%d+$") then
+		return "rbxassetid://" .. id
+	end
+	return id
+end
+
+local function makeSlot(entry)
+	if entry.kind == "gun" then
+		return { kind = "gun", weapon = entry.weapon }
+	end
+	return { kind = entry.kind }
+end
+
+local function getAssetsRoot()
+	if AssetsRoot and AssetsRoot.Parent then
+		return AssetsRoot
+	end
+	local assets = RS:FindFirstChild("Assets")
+	AssetsRoot = assets and assets:FindFirstChild("Skins")
+	return AssetsRoot
+end
+
+local function reloadAttrData()
+	AttrData = nil
+	local ok, data = pcall(function()
+		local raw = RS:GetAttribute("AvaiableSkins")
+		if type(raw) == "string" and raw ~= "" then
+			return HttpService:JSONDecode(raw)
+		end
+	end)
+	if ok and type(data) == "table" then
+		AttrData = data
+	end
+	return AttrData ~= nil
+end
+
+local function findChildCI(parent, name)
+	if not parent or type(name) ~= "string" then
+		return nil
+	end
+	local direct = parent:FindFirstChild(name)
+	if direct then
+		return direct
+	end
+	local target = name:lower()
+	for _, c in ipairs(parent:GetChildren()) do
+		if c.Name:lower() == target then
+			return c
+		end
+	end
+	return nil
+end
+
+local function collectSkinEntries(weaponName, attrTable, fallbackList, skipNames)
+	local root = getAssetsRoot()
+	local folder = root and findChildCI(root, weaponName) or nil
+	local out, seen = {}, {}
+
+	local function push(rawName, id)
+		local name = tostring(rawName)
+		if name == "" then return end
+		local key = name:lower()
+		if seen[key] then return end
+		seen[key] = true
+		local canonical = name
+		if folder then
+			local sf = findChildCI(folder, name)
+			if sf then
+				canonical = sf.Name
+			end
+		end
+		table.insert(out, { name = canonical, id = id })
+	end
+
+	local attrUsed = type(attrTable) == "table" and next(attrTable) ~= nil
+	if attrUsed then
+		for name, data in pairs(attrTable) do
+			if type(data) == "table" and data.isEnabled ~= false then
+				local id
+				if type(data.wearImages) == "table" and data.wearImages[1] then
+					id = data.wearImages[1].assetId
+				end
+				id = id or data.imageAssetId
+				push(name, id and normId(id) or nil)
+			end
+		end
+	end
+
+	if folder then
+		for _, c in ipairs(folder:GetChildren()) do
+			local n = c.Name
+			if n ~= "Terrorists" and n ~= "Counter-Terrorists" and n ~= "Camera" then
+				push(n, nil)
+			end
+		end
+	end
+
+	if not attrUsed and #out == 0 then
+		for _, s in ipairs(fallbackList or {}) do
+			push(s[1], s[2] and normId(s[2]) or nil)
+		end
+	end
+
+	local final = {}
+	for _, e in ipairs(out) do
+		local okSkin = true
+		if folder then
+			okSkin = findChildCI(folder, e.name) ~= nil
+		end
+		if okSkin and skipNames and skipNames[e.name:lower()] then
+			okSkin = false
+		end
+		if okSkin then
+			table.insert(final, e)
+		end
+	end
+	table.sort(final, function(a, b)
+		return a.name:lower() < b.name:lower()
+	end)
+	return final
+end
+
+local function discoverGloveTypes()
+	local set = {}
+	for _, g in ipairs(GLOVE_TYPES) do
+		set[g] = true
+	end
+	local root = getAssetsRoot()
+	if root then
+		for _, c in ipairs(root:GetChildren()) do
+			local n = c.Name
+			if n ~= "Gloves" and not GLOVE_TYPE_EXCLUDE[n] and (n:find("Glove") or n == "Hand Wraps") then
+				set[n] = true
+			end
+		end
+	end
+	if type(AttrData) == "table" then
+		for k in pairs(AttrData) do
+			if type(k) == "string" and k ~= "Gloves" and not GLOVE_TYPE_EXCLUDE[k]
+				and (k:find("Glove") or k == "Hand Wraps") then
+				set[k] = true
+			end
+		end
+	end
+	local out = {}
+	for n in pairs(set) do
+		table.insert(out, n)
+	end
+	table.sort(out, function(a, b)
+		return a:lower() < b:lower()
+	end)
+	return out
+end
+
+local function buildCatalog()
+	Catalog.KnifeEntries, Catalog.GunEntries, Catalog.GloveTypeEntries = {}, {}, {}
+	local attr = AttrData
+
+	for _, knife in ipairs(KNIVES) do
+		local isSaber = (knife.name == "LightSaber")
+		local list = {
+			{
+				kind = "knife", name = "默认", label = knife.name .. " | 默认",
+				id = isSaber and nil or knife.icon,
+				isDefault = true, usesViewport = isSaber,
+				knife = knife.name, skin = "", wear = "Factory New",
+			},
+		}
+		local skins = collectSkinEntries(knife.name, attr and attr[knife.name], FALLBACK_KNIVES[knife.name])
+		for _, s in ipairs(skins) do
+			table.insert(list, {
+				kind = "knife", name = s.name, label = knife.name .. " | " .. s.name,
+				id = isSaber and nil or (s.id or knife.icon),
+				isDefault = false, usesViewport = isSaber,
+				knife = knife.name, skin = s.name, wear = "Factory New",
+			})
+		end
+		Catalog.KnifeEntries[knife.name] = list
+	end
+
+	do
+		GloveTypeOrder = discoverGloveTypes()
+		for _, gtype in ipairs(GloveTypeOrder) do
+			local list = {}
+			local skins = collectSkinEntries(gtype, attr and attr[gtype], FALLBACK_GLOVES[gtype], SKIP_GLOVE_SKINS)
+			local root = getAssetsRoot()
+			local folder = root and findChildCI(root, gtype) or nil
+			local hasDefault = folder and (findChildCI(folder, "Stock") or findChildCI(folder, "Vanilla"))
+			if hasDefault then
+				table.insert(list, {
+					kind = "glove", name = "默认", label = gtype .. " | 默认",
+					id = nil, isDefault = true,
+					gloveType = gtype, skin = "", wear = "Factory New",
+				})
+			end
+			for _, s in ipairs(skins) do
+				table.insert(list, { kind = "glove", name = s.name, label = gtype .. " | " .. s.name, id = s.id or GLOVE_ICON, isDefault = false, gloveType = gtype, skin = s.name, wear = "Factory New" })
+			end
+			Catalog.GloveTypeEntries[gtype] = list
+		end
+	end
+
+	for _, cat in ipairs(CATEGORIES) do
+		local entries = {
+			{
+				kind = "gun", name = "默认", label = cat.weapon .. " | 默认",
+				id = nil, isDefault = true,
+				weapon = cat.weapon, skin = "", wear = "Factory New",
+			},
+		}
+		local skins = collectSkinEntries(cat.weapon, attr and attr[cat.weapon], FALLBACK_GUNS[cat.weapon], SKIP_GUN_SKINS)
+		for _, s in ipairs(skins) do
+			table.insert(entries, { kind = "gun", name = s.name, label = cat.weapon .. " | " .. s.name, id = s.id or cat.icon, isDefault = false, weapon = cat.weapon, skin = s.name, wear = "Factory New" })
+		end
+		Catalog.GunEntries[cat.id] = entries
+	end
+end
+
+--// ======================== 4. 配置 ========================
+if type(getgenv().SkinConfig) ~= "table" then
+	getgenv().SkinConfig = {
+		DK = nil, DS = "", DW = "Factory New",
+		GG = nil, GS = "", GW = "Factory New",
+		GunSkins = {}, GunWear = "Factory New",
+	}
+end
+if type(getgenv().SkinConfig.GunSkins) ~= "table" then
+	getgenv().SkinConfig.GunSkins = {}
+end
+if getgenv().SkinReplaceEnabled == nil then
+	getgenv().SkinReplaceEnabled = false
+end
+
+--// ======================== 5. 皮肤钩子 ========================
+local HookRegistry = {}
+local HooksInstalled = false
+local SkinApplier = { Reason = "" }
+local GloveEngine = { Available = false, OrigGetGloves = nil, Probing = false, Controller = nil }
+
+do
+
+local function restorePreviousSessionHooks()
+	local store = getgenv().SkinHookStore
+	if type(store) ~= "table" then return end
+	for i = #store, 1, -1 do
+		local h = store[i]
+		pcall(function()
+			if type(h) == "table" and type(h.module) == "table" and type(h.orig) == "function" and h.funcName then
+				h.module[h.funcName] = h.orig
+			end
+		end)
+		store[i] = nil
+	end
+	getgenv().SkinHookStore = nil
+end
+
+local function addHook(module, funcName, makeWrapper)
+	if type(module) ~= "table" or type(module[funcName]) ~= "function" then
+		return false
+	end
+	local orig = module[funcName]
+	local entry = { module = module, funcName = funcName, orig = orig }
+	table.insert(HookRegistry, entry)
+	local store = getgenv().SkinHookStore
+	if type(store) ~= "table" then
+		store = {}
+		getgenv().SkinHookStore = store
+	end
+	table.insert(store, entry)
+	module[funcName] = makeWrapper(orig)
+	return true
+end
+
+local function removeAllHooks()
+	for i = #HookRegistry, 1, -1 do
+		local h = HookRegistry[i]
+		pcall(function() h.module[h.funcName] = h.orig end)
+		HookRegistry[i] = nil
+	end
+	getgenv().SkinHookStore = nil
+	HooksInstalled = false
+end
+
+local function getWearFolder(root, weaponName, skinName, wear)
+	local wf = root:FindFirstChild(weaponName)
+	local sf = wf and wf:FindFirstChild(skinName)
+	local cam = sf and sf:FindFirstChild("Camera")
+	if not cam then return nil end
+	return cam:FindFirstChild(wear or "Factory New") or cam:FindFirstChild("Factory New")
+end
+
+local function patchWeaponModel(viewmodel, weaponName, skinName, wear)
+	pcall(function()
+		if not viewmodel or not viewmodel.Parent then return end
+		if type(skinName) ~= "string" or skinName == "" or skinName == "Vanilla" then return end
+		local tag = tostring(weaponName) .. "|" .. skinName
+		if viewmodel:GetAttribute("SkinApplied") == tag then return end
+		local root = getAssetsRoot()
+		if not root then return end
+		local wearFolder = getWearFolder(root, weaponName, skinName, wear)
+		if not wearFolder then return end
+		local target = viewmodel:FindFirstChild("Weapon") or viewmodel
+		for _, part in ipairs(target:GetDescendants()) do
+			if part:IsA("BasePart") then
+				local template = wearFolder:FindFirstChild(part.Name)
+				if template then
+					local old = part:FindFirstChildOfClass("SurfaceAppearance")
+					if old then old:Destroy() end
+					local clone = template:Clone()
+					clone.Name = "SurfaceAppearance"
+					clone.Parent = part
+				end
+			end
+		end
+		viewmodel:SetAttribute("SkinApplied", tag)
+	end)
+end
+
+local function isKnifeName(name)
+	return name == "CT Knife" or name == "T Knife"
+end
+
+local knifeSkinCache = {}
+
+local function resolveKnifeSkin(knifeName, prefer)
+	local root = getAssetsRoot()
+	local kf = root and findChildCI(root, knifeName) or nil
+	if kf then
+		if type(prefer) == "string" and prefer ~= "" then
+			local sf = findChildCI(kf, prefer)
+			if sf then return sf.Name end
+		end
+		local cached = knifeSkinCache[knifeName]
+		if cached and findChildCI(kf, cached) then return cached end
+		for _, s in ipairs({ KNIFE_DEFAULT_SKIN[knifeName], "Vanilla", "Stock" }) do
+			if type(s) == "string" then
+				local sf = findChildCI(kf, s)
+				if sf then
+					knifeSkinCache[knifeName] = sf.Name
+					return sf.Name
+				end
+			end
+		end
+		for _, c in ipairs(kf:GetChildren()) do
+			local n = c.Name
+			if n ~= "Terrorists" and n ~= "Counter-Terrorists" and n ~= "Camera" then
+				knifeSkinCache[knifeName] = n
+				return n
+			end
+		end
+	end
+	if type(prefer) == "string" and prefer ~= "" then return prefer end
+	return KNIFE_DEFAULT_SKIN[knifeName] or "Vanilla"
+end
+
+local function getKnifeOverride()
+	local cfg = getgenv().SkinConfig
+	if type(cfg) ~= "table" or not getgenv().SkinReplaceEnabled then return nil end
+	local knifeName = cfg.DK
+	if not KNIFE_NAME_SET[knifeName] then return nil end
+	local prefer = (type(cfg.DS) == "string" and cfg.DS ~= "") and cfg.DS or nil
+	local skin = resolveKnifeSkin(knifeName, prefer)
+	if type(skin) ~= "string" or skin == "" then return nil end
+	return knifeName, skin, cfg.DW or "Factory New"
+end
+
+local function getGunOverride(weaponName)
+	local cfg = getgenv().SkinConfig
+	if type(cfg) ~= "table" or not getgenv().SkinReplaceEnabled then return nil end
+	local skins = cfg.GunSkins
+	local skin = (type(skins) == "table") and skins[weaponName] or nil
+	if type(skin) == "string" and skin ~= "" then
+		return skin, cfg.GunWear or "Factory New"
+	end
+	return nil
+end
+
+local foreignScope = 0
+
+local function detectOwnerContext(...)
+	local foundLocal, foundForeign = false, false
+	local args = table.pack(...)
+	local ownChar = LP.Character
+
+	local function classify(v)
+		if typeof(v) ~= "Instance" then return end
+		if v == LP then foundLocal = true; return end
+		if v:IsA("Player") then
+			if v == LP then foundLocal = true else foundForeign = true end
+			return
+		end
+		if ownChar and v:IsDescendantOf(ownChar) then foundLocal = true; return end
+		local plr = Players:GetPlayerFromCharacter(v)
+		if plr then
+			if plr == LP then foundLocal = true else foundForeign = true end
+			return
+		end
+		local anc = v.Parent
+		for _ = 1, 6 do
+			if not anc or anc == game then break end
+			if anc == LP or (ownChar and anc == ownChar) then foundLocal = true; return end
+			local ap = Players:GetPlayerFromCharacter(anc)
+			if ap then
+				if ap == LP then foundLocal = true else foundForeign = true end
+				return
+			end
+			anc = anc.Parent
+		end
+	end
+
+	for i = 1, args.n do
+		classify(args[i])
+		if foundForeign then break end
+	end
+
+	if foundForeign then return "foreign" end
+	if foundLocal then return "local" end
+	return nil
+end
+
+local function detectSelfOwner(self)
+	local cands = {}
+	if typeof(self) == "Instance" then
+		table.insert(cands, self)
+	elseif type(self) == "table" then
+		for _, key in ipairs({ "Player", "Character", "Owner", "Humanoid" }) do
+			local v = self[key]
+			if v ~= nil then table.insert(cands, v) end
+		end
+	end
+	if #cands == 0 then return nil end
+	return detectOwnerContext(table.unpack(cands))
+end
+
+local debugLog = false
+getgenv().SkinDebugLog = function(seconds)
+	local s = tonumber(seconds) or 15
+	debugLog = true
+	print(("[美化菜单] 开始记录皮肤工厂调用 %d 秒…"):format(s))
+	pcall(function() Library:Notify(("调试日志 %d 秒"):format(s), 2) end)
+	task.delay(s, function()
+		debugLog = false
+		print("[美化菜单] 调试日志结束")
+	end)
+end
+
+local function dbg(tag, weaponName, skinName, ctx, overridden)
+	if debugLog then
+		print(("[美化菜单·调试] %s | weapon=%s skin=%s ctx=%s overridden=%s")
+			:format(tag, tostring(weaponName), tostring(skinName), tostring(ctx), tostring(overridden)))
+	end
+end
+
+local function callForeign(orig, ...)
+	foreignScope += 1
+	local results = table.pack(pcall(orig, ...))
+	foreignScope -= 1
+	if not results[1] then
+		error(results[2] ~= nil and results[2] or "工厂调用出错", 0)
+	end
+	return table.unpack(results, 2, results.n)
+end
+
+local function makeCameraModelWrapper(orig)
+	return function(weaponName, skinName, ...)
+		local extra = table.pack(...)
+		local ctx = detectOwnerContext(table.unpack(extra, 1, extra.n))
+		if ctx == "foreign" or foreignScope > 0 then
+			dbg("CameraModel", weaponName, skinName, ctx or "scope", false)
+			return callForeign(orig, weaponName, skinName, table.unpack(extra, 1, extra.n))
+		end
+		local function callOrig(name, skin)
+			return orig(name, skin, table.unpack(extra, 1, extra.n))
+		end
+		local model
+		local overridden = false
+		if isKnifeName(weaponName) then
+			local knifeName, knifeSkin, wear = getKnifeOverride()
+			if knifeName then
+				local ok, res = pcall(callOrig, knifeName, knifeSkin)
+				if ok and res then
+					model = res
+					overridden = true
+					task.defer(patchWeaponModel, model, knifeName, knifeSkin, wear)
+				end
+			end
+			if not model then model = callOrig(weaponName, skinName) end
+		else
+			local gunSkin, wear = getGunOverride(weaponName)
+			if gunSkin then
+				local ok, res = pcall(callOrig, weaponName, gunSkin)
+				if ok and res then
+					model = res
+					overridden = true
+					task.defer(patchWeaponModel, model, weaponName, gunSkin, wear)
+				end
+			end
+			if not model then model = callOrig(weaponName, skinName) end
+		end
+		dbg("CameraModel", weaponName, skinName, ctx, overridden)
+		return model
+	end
+end
+
+local function makeBaseWeaponWrapper(orig)
+	return function(weaponName, ...)
+		local extra = table.pack(...)
+		local ctx = detectOwnerContext(table.unpack(extra, 1, extra.n))
+		if ctx == "foreign" or foreignScope > 0 then
+			dbg("BaseWeaponModel", weaponName, nil, ctx or "scope", false)
+			return callForeign(orig, weaponName, table.unpack(extra, 1, extra.n))
+		end
+		local model
+		local overridden = false
+		if isKnifeName(weaponName) then
+			local knifeName, knifeSkin, wear = getKnifeOverride()
+			if knifeName then
+				local ok, res = pcall(orig, knifeName, table.unpack(extra, 1, extra.n))
+				if ok and res then
+					model = res
+					overridden = true
+					task.defer(patchWeaponModel, model, knifeName, knifeSkin, wear)
+				end
+			end
+		end
+		if not model then model = orig(weaponName, table.unpack(extra, 1, extra.n)) end
+		dbg("BaseWeaponModel", weaponName, nil, ctx, overridden)
+		return model
+	end
+end
+
+local function makeCharacterModelWrapper(orig)
+	return function(weaponName, skinName, ...)
+		local extra = table.pack(...)
+		local ctx = detectOwnerContext(table.unpack(extra, 1, extra.n))
+		if ctx ~= "local" or foreignScope > 0 then
+			dbg("CharacterModel", weaponName, skinName, ctx or "scope", false)
+			return callForeign(orig, weaponName, skinName, table.unpack(extra, 1, extra.n))
+		end
+		local function callOrig(name, skin)
+			return orig(name, skin, table.unpack(extra, 1, extra.n))
+		end
+		local model
+		local overridden = false
+		if isKnifeName(weaponName) then
+			local knifeName, knifeSkin = getKnifeOverride()
+			if knifeName then
+				local ok, res = pcall(callOrig, knifeName, knifeSkin)
+				if ok and res then
+					model = res
+					overridden = true
+				end
+			end
+			if not model then model = callOrig(weaponName, skinName) end
+		else
+			local gunSkin = getGunOverride(weaponName)
+			if gunSkin then
+				local ok, res = pcall(callOrig, weaponName, gunSkin)
+				if ok and res then
+					model = res
+					overridden = true
+				end
+			end
+			if not model then model = callOrig(weaponName, skinName) end
+		end
+		dbg("CharacterModel", weaponName, skinName, ctx, overridden)
+		return model
+	end
+end
+
+local function makeViewmodelNewWrapper(orig)
+	return function(self, weaponName, skinName, ...)
+		local extra = table.pack(...)
+		local ctx = detectSelfOwner(self)
+		if ctx == "foreign" or foreignScope > 0 then
+			dbg("Viewmodel.new", weaponName, skinName, ctx or "scope", false)
+			return callForeign(orig, self, weaponName, skinName, table.unpack(extra, 1, extra.n))
+		end
+		local function callNew(name, skin)
+			return orig(self, name, skin, table.unpack(extra, 1, extra.n))
+		end
+		local model
+		local overridden = false
+		if isKnifeName(weaponName) then
+			local knifeName, knifeSkin, wear = getKnifeOverride()
+			if knifeName then
+				local ok, res = pcall(callNew, knifeName, knifeSkin)
+				if ok and res then
+					model = res
+					overridden = true
+					task.defer(patchWeaponModel, model, knifeName, knifeSkin, wear)
+				end
+			end
+			if not model then model = callNew(weaponName, skinName) end
+		else
+			local gunSkin, wear = getGunOverride(weaponName)
+			if gunSkin then
+				local ok, res = pcall(callNew, weaponName, gunSkin)
+				if ok and res then
+					model = res
+					overridden = true
+					task.defer(patchWeaponModel, model, weaponName, gunSkin, wear)
+				end
+			end
+			if not model then model = callNew(weaponName, skinName) end
+		end
+		dbg("Viewmodel.new", weaponName, skinName, ctx, overridden)
+		return model
+	end
+end
+
+local function findModule(name, preferPath)
+	local node = RS
+	if preferPath then
+		for _, seg in ipairs(preferPath) do
+			node = node and node:FindFirstChild(seg)
+		end
+	end
+	if node and node:IsA("ModuleScript") then return node end
+	for _, inst in ipairs(RS:GetDescendants()) do
+		if inst:IsA("ModuleScript") and inst.Name == name then
+			return inst
+		end
+	end
+	return nil
+end
+
+local function lazyRequireSkins()
+	local mod = findModule("Skins", { "Database", "Components", "Libraries", "Skins" })
+	if not mod then return nil end
+	local ok, lib = pcall(require, mod)
+	if ok and type(lib) == "table" and type(lib.GetCameraModel) == "function" then
+		return lib
+	end
+	return nil
+end
+
+-- 手套引擎（GloveEngine 已在块外声明）
+local gloveSkinCache = {}
+
+local function getInventoryController()
+	if GloveEngine.Controller then return GloveEngine.Controller end
+	local mod = findModule("InventoryController", { "Controllers", "InventoryController" })
+	if not mod then return nil end
+	local ok, ctrl = pcall(require, mod)
+	if ok and type(ctrl) == "table" then
+		GloveEngine.Controller = ctrl
+		return ctrl
+	end
+	return nil
+end
+
+local function getActiveLoadout()
+	local ctrl = getInventoryController()
+	if not ctrl then return nil end
+	local gUp = getupvalues or debug.getupvalues
+	if type(gUp) ~= "function" then return nil end
+	for _, fnName in ipairs({ "getCurrentEquipped", "removeInventoryItem", "getInventorySlot", "getCurrentInventory" }) do
+		local fn = ctrl[fnName]
+		if type(fn) == "function" then
+			local ok, uvs = pcall(gUp, fn)
+			if ok and type(uvs) == "table" then
+				for _, uv in pairs(uvs) do
+					if type(uv) == "table" and rawget(uv, "Inventory") then
+						return uv
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function getGloveItem(ld)
+	if not ld or type(ld.Inventory) ~= "table" then return nil end
+	local slot = ld.Inventory[7] or ld.Inventory[6] or ld.Inventory["Gloves"]
+	return slot and slot._items and slot._items[1] or nil
+end
+
+local function getGloveOverride()
+	local cfg = getgenv().SkinConfig
+	if type(cfg) ~= "table" or not getgenv().SkinReplaceEnabled then return nil end
+	local gtype = cfg.GG
+	if type(gtype) ~= "string" or gtype == "" then return nil end
+	local gskin = cfg.GS
+	if type(gskin) ~= "string" then gskin = "" end
+	return gtype, gskin
+end
+
+local function buildGloveModel(gtype, gskin)
+	if GloveEngine.Probing then return nil end
+	local lib = lazyRequireSkins()
+	if not lib then return nil end
+	local fn = GloveEngine.OrigGetGloves or lib.GetGloves
+	if type(fn) ~= "function" then return nil end
+	GloveEngine.Probing = true
+	local ok, model = pcall(fn, gtype, gskin, 0.001)
+	GloveEngine.Probing = false
+	if ok and model then return model end
+	return nil
+end
+
+local function gloveCandidates(gtype, prefer)
+	local out = {}
+	local function add(s)
+		if type(s) == "string" and s ~= "" and not table.find(out, s) then
+			table.insert(out, s)
+		end
+	end
+	add(prefer)
+	add("Stock")
+	add("Vanilla")
+	local root = getAssetsRoot()
+	local tf = root and findChildCI(root, gtype)
+	if tf then
+		for _, c in ipairs(tf:GetChildren()) do
+			local n = c.Name
+			if not n:find("PATTERN") and n ~= "Terrorists" and n ~= "Counter-Terrorists" then
+				add(n)
+			end
+		end
+	end
+	return out
+end
+
+local function resolveGloveBuild(gtype, prefer)
+	if type(gtype) ~= "string" or gtype == "" then return nil end
+	local key = gtype .. "|" .. tostring(prefer)
+	local cached = gloveSkinCache[key]
+	if cached then
+		local model = buildGloveModel(gtype, cached)
+		if model then return model, cached end
+		gloveSkinCache[key] = nil
+	end
+	for _, skin in ipairs(gloveCandidates(gtype, prefer)) do
+		local model = buildGloveModel(gtype, skin)
+		if model then
+			gloveSkinCache[key] = skin
+			return model, skin
+		end
+	end
+	return nil
+end
+
+function GloveEngine.Rebuild()
+	local lib = lazyRequireSkins()
+	if not (lib and type(lib.GetGloves) == "function") then
+		GloveEngine.Available = false
+		return false
+	end
+	local ld = getActiveLoadout()
+	if not ld then
+		GloveEngine.Available = false
+		return false
+	end
+	local vm = ld.CurrentEquipped and ld.CurrentEquipped.Viewmodel
+	if not vm then return false end
+	local item = getGloveItem(ld)
+
+	local gtype, gskin = getGloveOverride()
+	local targetType, prefer
+	if gtype then
+		targetType = gtype
+		prefer = (gskin ~= "" and gskin) or nil
+	else
+		targetType = (item and item.Name) or ((LP:GetAttribute("Team") == "Terrorists") and "T Glove" or "CT Glove")
+		prefer = (item and item.Skin) or nil
+	end
+
+	local built = resolveGloveBuild(targetType, prefer)
+	if not built then return false end
+
+	local ok = pcall(function()
+		if vm.Model then built.Parent = vm.Model end
+		if vm.Gloves then pcall(function() vm.Gloves:Destroy() end) end
+		vm.Gloves = built
+	end)
+	if not ok then
+		pcall(function() built:Destroy() end)
+		return false
+	end
+	GloveEngine.Available = true
+	return true
+end
+
+function GloveEngine.RebuildSoon()
+	task.defer(function()
+		pcall(GloveEngine.Rebuild)
+		task.wait(0.1)
+		pcall(GloveEngine.Rebuild)
+	end)
+end
+
+local function makeGlovesWrapper(orig)
+	return function(name, skin, float, ...)
+		local extra = table.pack(...)
+		local function callOrig(n, s, f)
+			return orig(n, s, type(f) == "number" and f or 0.001, table.unpack(extra, 1, extra.n))
+		end
+		local gtype, gskin = getGloveOverride()
+		if not gtype then return callOrig(name, skin, float) end
+		local built = resolveGloveBuild(gtype, (gskin ~= "" and gskin) or nil)
+		if built then return built end
+		return callOrig(name, skin, float)
+	end
+end
+
+local function migrateLegacy()
+	local lib = lazyRequireSkins()
+	if not lib then return end
+	local legacy = {
+		{ "GetCameraModel", "SkinLibOrig" },
+		{ "GetBaseWeaponModel", "SkinBaseOrig" },
+		{ "GetCharacterModel", "SkinCharOrig" },
+	}
+	for _, item in ipairs(legacy) do
+		local saved = getgenv()[item[2]]
+		if type(saved) == "function" and lib[item[1]] ~= saved then
+			pcall(function() lib[item[1]] = saved end)
+		end
+		getgenv()[item[2]] = nil
+	end
+end
+
+-- SkinApplier 已在块外声明
+function SkinApplier.tryInstall()
+	if HooksInstalled then return true end
+	local lib = lazyRequireSkins()
+	if not lib then
+		SkinApplier.Reason = "未找到 Skins 库"
+		return false
+	end
+
+	restorePreviousSessionHooks()
+	migrateLegacy()
+	removeAllHooks()
+
+	addHook(lib, "GetCameraModel", makeCameraModelWrapper)
+	addHook(lib, "GetBaseWeaponModel", makeBaseWeaponWrapper)
+	addHook(lib, "GetCharacterModel", makeCharacterModelWrapper)
+
+	GloveEngine.OrigGetGloves = lib.GetGloves
+	addHook(lib, "GetGloves", makeGlovesWrapper)
+
+	local vmModule = findModule("Viewmodel", { "Classes", "WeaponComponent", "Classes", "Viewmodel" })
+	if vmModule then
+		local ok, vm = pcall(require, vmModule)
+		if ok and type(vm) == "table" then
+			addHook(vm, "new", makeViewmodelNewWrapper)
+		end
+	end
+
+	HooksInstalled = true
+	return true
+end
+
+getgenv().SkinInstallHooks = function()
+	if HooksInstalled then
+		Library:Notify("皮肤钩子已在运行", 2)
+		return
+	end
+	if SkinApplier.tryInstall() then
+		Library:Notify("皮肤钩子已重装，切枪 / 重生后生效", 4)
+	else
+		Library:Notify("重装失败：" .. tostring(SkinApplier.Reason), 4)
+	end
+end
+
+getgenv().SkinUninstallHooks = function()
+	removeAllHooks()
+	Library:Notify("皮肤钩子已卸载。再次应用皮肤会自动重装", 4)
+end
+
+SkinApplier.tryInstall()
+task.spawn(function()
+	if HooksInstalled then return end
+	for _ = 1, 30 do
+		task.wait(2)
+		if Library.Unloaded then return end
+		if SkinApplier.tryInstall() then
+			pcall(function() Library:Notify("皮肤替换已就绪", 2) end)
+			return
+		end
+	end
+	warn("[美化菜单] " .. SkinApplier.Reason .. "（非 Blox Strike 环境可忽略）")
+end)
+
+end -- ★ 节 5 结束
+
+--// ======================== 5.5 观战检测（供 6.8 / 6.9 / 6.11 共用） ========================
+-- ★ v22 新增：判断是否正在观战别人（相机跟随另一个玩家的角色）
+local function isSpectating()
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return false
+	end
+	local sub = cam.CameraSubject
+	if not sub then
+		return false
+	end
+	if sub:IsA("Humanoid") then
+		local char = sub.Parent
+		if char and char:IsA("Model") then
+			local owner = Players:GetPlayerFromCharacter(char)
+			if owner and owner ~= LP then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+--// ======================== 6. UI：美化页 ========================
+local Tab = Tabs.Beautify
+
+local renderGrid, applySkin
+local updatePreviewBig, refreshAppliedThumbs, deleteCurrentSlot, deleteAllSkins
+local ViewStack = { { title = "全部武器", render = nil } }
+
+local function createGrid(parentGroupbox, cellSize, cellPad)
+	local holder = Library:Create("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 0),
+		LayoutOrder = 999,
+		ZIndex = 5,
+		Parent = parentGroupbox.Container,
+	})
+	local layout = Library:Create("UIGridLayout", {
+		CellSize = UDim2.fromOffset(cellSize, cellSize),
+		CellPadding = UDim2.fromOffset(cellPad, cellPad),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
+		Parent = holder,
+	})
+	local function sync()
+		holder.Size = UDim2.new(1, 0, 0, layout.AbsoluteContentSize.Y)
+		parentGroupbox:Resize()
+	end
+	layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		task.defer(sync)
+	end)
+	local tools = { holder = holder, sync = sync }
+	function tools.clear()
+		for _, child in ipairs(holder:GetChildren()) do
+			if child:IsA("GuiObject") then child:Destroy() end
+		end
+		sync()
+	end
+	sync()
+	return tools
+end
+
+--== 光剑 3D 预览（静态）==
+local lightSaberSource = nil
+local function getLightSaberModel()
+	if lightSaberSource and lightSaberSource.Parent then
+		return lightSaberSource
+	end
+	lightSaberSource = nil
+	local assets = RS:FindFirstChild("Assets")
+	local weapons = assets and assets:FindFirstChild("Weapons")
+	if not weapons then return nil end
+	local saber = findChildCI(weapons, "LightSaber")
+	if not saber then return nil end
+	local camModel = findChildCI(saber, "Camera")
+	local weapon = camModel and findChildCI(camModel, "Weapon")
+	lightSaberSource = weapon or camModel or saber
+	return lightSaberSource
+end
+
+local function boundsOf(inst)
+	local parts = {}
+	if inst:IsA("BasePart") then table.insert(parts, inst) end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then table.insert(parts, d) end
+	end
+	if #parts == 0 then return nil end
+	local mn, mx
+	for _, p in ipairs(parts) do
+		local h = p.Size / 2
+		local a, b = p.Position - h, p.Position + h
+		if mn then
+			mn = Vector3.new(math.min(mn.X, a.X), math.min(mn.Y, a.Y), math.min(mn.Z, a.Z))
+			mx = Vector3.new(math.max(mx.X, b.X), math.max(mx.Y, b.Y), math.max(mx.Z, b.Z))
+		else
+			mn, mx = a, b
+		end
+	end
+	return CFrame.new((mn + mx) / 2), (mx - mn)
+end
+
+local function createSaberViewport(parentFrame, position, size)
+	local source = getLightSaberModel()
+	if not source then return nil end
+	local ok, frame = pcall(function()
+		local vp = Instance.new("ViewportFrame")
+		vp.BackgroundTransparency = 1
+		vp.Ambient = Color3.fromRGB(255, 255, 255)
+		vp.LightColor = Color3.fromRGB(255, 255, 255)
+		vp.LightDirection = Vector3.new(-0.4, -1, -0.35).Unit
+		vp.ZIndex = 6
+		vp.Position = position
+		vp.Size = size
+
+		local clone = source:Clone()
+		for _, d in ipairs(clone:GetDescendants()) do
+			if d:IsA("LuaSourceContainer") or d:IsA("Camera") then
+				d:Destroy()
+			elseif d:IsA("BasePart") then
+				d.Anchored = true
+			end
+		end
+		clone.Parent = vp
+
+		local cf, sz = boundsOf(clone)
+		if not cf then error("模型没有部件") end
+		local radius = math.max(sz.Magnitude, 2)
+		local cam = Instance.new("Camera")
+		cam.FieldOfView = 45
+		cam.Parent = vp
+		vp.CurrentCamera = cam
+		local offset = Vector3.new(0.8, 0.45, 1).Unit * radius * 0.85
+		cam.CFrame = CFrame.lookAt(cf.Position + offset, cf.Position)
+		return vp
+	end)
+	if not ok or not frame then return nil end
+	frame.Parent = parentFrame
+	return frame
+end
+
+--== 图片预热器 ==
+local imageRefs = {}
+local warmRunning, warmQueued = false, false
+
+local function registerImage(lbl, id)
+	if type(id) ~= "string" or id == "" or not id:match("^rbxasset") then return end
+	local list = imageRefs[id]
+	if not list then
+		list = {}
+		imageRefs[id] = list
+	end
+	for i = #list, 1, -1 do
+		if not list[i] or not list[i].Parent then table.remove(list, i) end
+	end
+	table.insert(list, lbl)
+end
+
+local function warmImages()
+	if warmRunning then
+		warmQueued = true
+		return
+	end
+	warmRunning = true
+	task.spawn(function()
+		local ContentProvider = game:GetService("ContentProvider")
+		repeat
+			warmQueued = false
+			local ids = {}
+			for id in pairs(imageRefs) do
+				table.insert(ids, id)
+			end
+			local failCount = 0
+			for i = 1, #ids, 24 do
+				local batch = {}
+				for j = i, math.min(i + 23, #ids) do
+					table.insert(batch, ids[j])
+				end
+				local failed = {}
+				pcall(function()
+					ContentProvider:PreloadAsync(batch, function(contentId, status)
+						if status ~= Enum.AssetFetchStatus.Success then
+							table.insert(failed, contentId)
+						end
+					end)
+				end)
+				for _, id in ipairs(failed) do
+					failCount += 1
+					for _, lbl in ipairs(imageRefs[id] or {}) do
+						pcall(function()
+							if lbl.Parent then
+								lbl.Image = ""
+								task.delay(0.3, function()
+									pcall(function()
+										if lbl.Parent then lbl.Image = id end
+									end)
+								end)
+							end
+						end)
+					end
+				end
+				task.wait(0.05)
+			end
+			if failCount > 0 then
+				warn(("[美化菜单] %d 张图片首载失败，已自动重试"):format(failCount))
+			end
+		until not warmQueued
+		warmRunning = false
+	end)
+end
+
+local function knifeIconByName(name)
+	for _, k in ipairs(KNIVES) do
+		if k.name == name then return k.icon end
+	end
+	return nil
+end
+
+local function collectApplied()
+	local list = {}
+	local cfg = getgenv().SkinConfig
+	if type(cfg) ~= "table" then return list end
+
+	if KNIFE_NAME_SET[cfg.DK] then
+		local dskin = type(cfg.DS) == "string" and cfg.DS or ""
+		for _, e in ipairs(Catalog.KnifeEntries[cfg.DK] or {}) do
+			if (e.skin or "") == dskin then
+				table.insert(list, { icon = e.id, label = e.label, entry = e, slot = makeSlot(e), usesViewport = e.usesViewport })
+				break
+			end
+		end
+	end
+
+	if type(cfg.GG) == "string" and cfg.GG ~= "" then
+		local gskin = type(cfg.GS) == "string" and cfg.GS or ""
+		local found
+		for _, e in ipairs(Catalog.GloveTypeEntries[cfg.GG] or {}) do
+			if (e.skin or "") == gskin then
+				found = e
+				break
+			end
+		end
+		if found then
+			table.insert(list, { icon = found.id, label = found.label, entry = found, slot = makeSlot(found) })
+		else
+			local label = cfg.GG .. ((gskin ~= "") and (" | " .. gskin) or " | 默认")
+			local synth = {
+				kind = "glove", name = (gskin ~= "") and gskin or "默认", label = label,
+				id = GLOVE_ICON, gloveType = cfg.GG, skin = gskin, wear = "Factory New",
+			}
+			table.insert(list, { icon = synth.id, label = synth.label, entry = synth, slot = makeSlot(synth) })
+		end
+	end
+
+	local gunItems = {}
+	for weaponName, skinName in pairs(cfg.GunSkins or {}) do
+		if type(skinName) == "string" and skinName ~= "" then
+			local foundEntry
+			for _, entries in pairs(Catalog.GunEntries) do
+				for _, e in ipairs(entries) do
+					if e.weapon == weaponName and e.skin == skinName then
+						foundEntry = e
+						break
+					end
+				end
+				if foundEntry then break end
+			end
+			if foundEntry then
+				table.insert(gunItems, { icon = foundEntry.id, label = foundEntry.label, entry = foundEntry, slot = makeSlot(foundEntry) })
+			else
+				local catIcon
+				for _, cat in ipairs(CATEGORIES) do
+					if cat.weapon == weaponName then
+						catIcon = cat.icon
+						break
+					end
+				end
+				local synth = { kind = "gun", name = skinName, label = weaponName .. " | " .. skinName, id = catIcon or "", weapon = weaponName, skin = skinName, wear = "Factory New" }
+				table.insert(gunItems, { icon = synth.id, label = synth.label, entry = synth, slot = makeSlot(synth) })
+			end
+		end
+	end
+	table.sort(gunItems, function(a, b) return a.label < b.label end)
+	for _, item in ipairs(gunItems) do
+		table.insert(list, item)
+	end
+
+	return list
+end
+
+--== 左栏：皮肤库 ==
+local LibBox = Tab:AddLeftGroupbox("皮肤库")
+
+LibBox:AddToggle("SkinBrowser_Enable", {
+	Text = "启用皮肤替换（本地）",
+	Default = getgenv().SkinReplaceEnabled == true,
+	Tooltip = "默认关闭；开启后切枪 / 重生生效，关闭后恢复游戏原生皮肤（手套会立即还原）",
+	Callback = function(value)
+		getgenv().SkinReplaceEnabled = value
+		if value and not HooksInstalled then
+			if SkinApplier.tryInstall() then
+				Library:Notify("皮肤钩子已重装", 3)
+			end
+		end
+		GloveEngine.RebuildSoon()
+	end,
+})
+
+local backButton = LibBox:AddButton({
+	Text = "← 返回上一级",
+	Func = function()
+		if #ViewStack > 1 then
+			table.remove(ViewStack)
+			renderGrid()
+		end
+	end,
+})
+
+local breadcrumbLabel = LibBox:AddLabel("位置：全部武器", true)
+local skinGrid = createGrid(LibBox, 76, 5)
+
+--// ======================== 6.5 右栏：已选预览 ========================
+local PreviewBox = Tab:AddRightGroupbox("已选预览")
+
+local CurrentPreviewItem = nil
+local previewViewport = nil
+
+local previewBigHolder = Library:Create("Frame", {
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -4, 0, 170),
+	LayoutOrder = 1,
+	ZIndex = 5,
+	Parent = PreviewBox.Container,
+})
+
+local previewBigImage = Library:Create("ImageLabel", {
+	BackgroundTransparency = 1,
+	Size = UDim2.fromScale(1, 1),
+	ScaleType = Enum.ScaleType.Fit,
+	Image = "",
+	ZIndex = 6,
+	Parent = previewBigHolder,
+})
+
+local function makePreviewSpacer(order)
+	return Library:Create("Frame", {
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 4),
+		LayoutOrder = order,
+		ZIndex = 5,
+		Parent = PreviewBox.Container,
+	})
+end
+
+makePreviewSpacer(2)
+
+local previewNameLabel = Library:CreateLabel({
+	Size = UDim2.new(1, -4, 0, 16),
+	TextSize = 14,
+	Text = "未选择任何皮肤（点左侧卡片或下方小图）",
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+	LayoutOrder = 3,
+	ZIndex = 5,
+	Parent = PreviewBox.Container,
+})
+
+makePreviewSpacer(4)
+
+local previewDivider = Library:Create("Frame", {
+	BackgroundColor3 = Color3.new(0, 0, 0),
+	BorderColor3 = Color3.new(0, 0, 0),
+	Size = UDim2.new(1, -4, 0, 5),
+	LayoutOrder = 5,
+	ZIndex = 5,
+	Parent = PreviewBox.Container,
+})
+local previewDividerInner = Library:Create("Frame", {
+	BackgroundColor3 = Library.MainColor,
+	BorderColor3 = Library.OutlineColor,
+	BorderMode = Enum.BorderMode.Inset,
+	Size = UDim2.new(1, 0, 1, 0),
+	ZIndex = 6,
+	Parent = previewDivider,
+})
+Library:AddToRegistry(previewDivider, { BorderColor3 = "Black" })
+Library:AddToRegistry(previewDividerInner, { BackgroundColor3 = "MainColor", BorderColor3 = "OutlineColor" })
+
+makePreviewSpacer(6)
+
+local previewAppliedHint = Library:CreateLabel({
+	Size = UDim2.new(1, -4, 0, 16),
+	TextSize = 14,
+	Text = "已应用 0 项（点小图选中 / 回看）",
+	TextXAlignment = Enum.TextXAlignment.Left,
+	LayoutOrder = 7,
+	ZIndex = 5,
+	Parent = PreviewBox.Container,
+})
+
+makePreviewSpacer(8)
+
+local thumbHolder = Library:Create("Frame", {
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, 0, 0, 0),
+	LayoutOrder = 9,
+	ZIndex = 5,
+	Parent = PreviewBox.Container,
+})
+
+local thumbLayout = Library:Create("UIGridLayout", {
+	CellSize = UDim2.fromOffset(46, 46),
+	CellPadding = UDim2.fromOffset(4, 4),
+	SortOrder = Enum.SortOrder.LayoutOrder,
+	FillDirection = Enum.FillDirection.Horizontal,
+	HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	VerticalAlignment = Enum.VerticalAlignment.Top,
+	Parent = thumbHolder,
+})
+
+local function syncThumbSize()
+	thumbHolder.Size = UDim2.new(1, 0, 0, thumbLayout.AbsoluteContentSize.Y)
+	pcall(function() PreviewBox:Resize() end)
+end
+thumbLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+	task.defer(syncThumbSize)
+end)
+
+updatePreviewBig = function(item)
+	if previewViewport then
+		previewViewport:Destroy()
+		previewViewport = nil
+	end
+	previewBigImage.Visible = true
+	if item then
+		CurrentPreviewItem = item
+		if item.usesViewport then
+			previewViewport = createSaberViewport(previewBigHolder, UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1))
+			if previewViewport then previewBigImage.Visible = false end
+		end
+		if previewBigImage.Visible then
+			previewBigImage.Image = item.icon or ""
+			registerImage(previewBigImage, item.icon)
+		end
+		previewNameLabel.Text = "已选：" .. tostring(item.label or "未知")
+	else
+		CurrentPreviewItem = nil
+		previewBigImage.Image = ""
+		previewNameLabel.Text = "未选择任何皮肤（点左侧卡片或下方小图）"
+	end
+	warmImages()
+end
+
+refreshAppliedThumbs = function()
+	for _, child in ipairs(thumbHolder:GetChildren()) do
+		if child:IsA("GuiObject") then child:Destroy() end
+	end
+	thumbLayout:ApplyLayout()
+	local list = collectApplied()
+	for i, item in ipairs(list) do
+		local btn = Library:Create("TextButton", {
+			AutoButtonColor = false, Text = "",
+			BackgroundColor3 = Library.MainColor,
+			BorderColor3 = Color3.new(0, 0, 0),
+			BorderSizePixel = 1,
+			LayoutOrder = i,
+			ZIndex = 5,
+			Parent = thumbHolder,
+		})
+		Library:AddToRegistry(btn, { BackgroundColor3 = "MainColor", BorderColor3 = "Black" })
+
+		local shown = false
+		if item.usesViewport then
+			shown = createSaberViewport(btn, UDim2.fromOffset(2, 2), UDim2.new(1, -4, 1, -4)) ~= nil
+		end
+		if not shown then
+			local icon = item.icon
+			if type(icon) ~= "string" or icon == "" then
+				if item.slot and item.slot.kind == "knife" then
+					icon = (item.entry and knifeIconByName(item.entry.knife)) or KNIFE_GROUP_ICON
+				else
+					icon = ""
+				end
+			end
+			local img = Library:Create("ImageLabel", {
+				BackgroundTransparency = 1,
+				Position = UDim2.fromOffset(2, 2),
+				Size = UDim2.new(1, -4, 1, -4),
+				ScaleType = Enum.ScaleType.Fit,
+				Image = icon,
+				ZIndex = 6,
+				Parent = btn,
+			})
+			registerImage(img, icon)
+		end
+
+		btn.MouseEnter:Connect(function() btn.BorderColor3 = Library.AccentColor end)
+		btn.MouseLeave:Connect(function() btn.BorderColor3 = Color3.new(0, 0, 0) end)
+		btn.MouseButton1Click:Connect(function() updatePreviewBig(item) end)
+	end
+	previewAppliedHint.Text = ("已应用 %d 项（点小图选中 / 回看）"):format(#list)
+	syncThumbSize()
+	warmImages()
+end
+
+deleteCurrentSlot = function()
+	local item = CurrentPreviewItem
+	if not item or not item.slot then
+		Library:Notify("请先在「已选预览」点选要删除的皮肤", 3)
+		return
+	end
+	local slot = item.slot
+	local cfg = getgenv().SkinConfig
+	local removed = false
+	if slot.kind == "knife" then
+		if KNIFE_NAME_SET[cfg.DK] then
+			cfg.DK, cfg.DS, cfg.DW = nil, "", "Factory New"
+			removed = true
+		end
+	elseif slot.kind == "glove" then
+		if type(cfg.GG) == "string" and cfg.GG ~= "" then
+			cfg.GG, cfg.GS, cfg.GW = nil, "", "Factory New"
+			removed = true
+		end
+	elseif slot.kind == "gun" then
+		if type(cfg.GunSkins) == "table" and cfg.GunSkins[slot.weapon] ~= nil then
+			cfg.GunSkins[slot.weapon] = nil
+			removed = true
+		end
+	end
+	if not removed then
+		Library:Notify("该项目当前没有已应用的皮肤", 2)
+		return
+	end
+	local label = item.label or "所选皮肤"
+	updatePreviewBig(nil)
+	renderGrid()
+	refreshAppliedThumbs()
+	if slot.kind == "glove" then
+		GloveEngine.RebuildSoon()
+		Library:Notify(("已删除：%s\n手套已恢复原样"):format(label), 4)
+	else
+		Library:Notify(("已删除：%s\n切枪 / 重生后恢复默认外观"):format(label), 4)
+	end
+end
+
+deleteAllSkins = function()
+	local cfg = getgenv().SkinConfig
+	cfg.DK, cfg.DS, cfg.DW = nil, "", "Factory New"
+	cfg.GG, cfg.GS, cfg.GW = nil, "", "Factory New"
+	cfg.GunSkins = {}
+	cfg.GunWear = "Factory New"
+	updatePreviewBig(nil)
+	renderGrid()
+	refreshAppliedThumbs()
+	GloveEngine.RebuildSoon()
+	Library:Notify("已删除全部皮肤\n手套已恢复原样，刀 / 枪切枪后恢复", 4)
+end
+
+--// ======================== 6.6 右栏：删除 ========================
+local DeleteBox = Tab:AddRightGroupbox("删除")
+
+DeleteBox:AddLabel("先点选小图，再删除", true)
+
+DeleteBox:AddButton({
+	Text = "删除",
+	Tooltip = "删除当前选中的皮肤，恢复该部位默认外观（手套立即恢复）",
+	Func = function() deleteCurrentSlot() end,
+})
+
+DeleteBox:AddButton({
+	Text = "删除全部",
+	Tooltip = "删除所有已应用皮肤，全部恢复默认外观",
+	Func = function() deleteAllSkins() end,
+})
+
+--// ======================== 6.7 自定义视角模型 ========================
+do -- ★ 分节包裹
+
+local VMState = getgenv().ViewModelState
+if type(VMState) ~= "table" then
+	VMState = {}
+	getgenv().ViewModelState = VMState
+end
+for k, dv in pairs({ Enabled = false, X = 0.05, Y = -0.27, Z = -0.15, Roll = 0 }) do
+	if VMState[k] == nil then VMState[k] = dv end
+end
+
+local VMOrig = getgenv().ViewModelOrig
+if type(VMOrig) ~= "table" then
+	VMOrig = setmetatable({}, { __mode = "k" })
+	getgenv().ViewModelOrig = VMOrig
+end
+
+local function vmParts(model)
+	local s = model and model:FindFirstChild("Stats")
+	local d = s and s:FindFirstChild("Default")
+	local r = s and s:FindFirstChild("Rotation")
+	if d and r and d:IsA("Vector3Value") and r:IsA("Vector3Value") then
+		return d, r
+	end
+	return nil
+end
+
+local function vmSnapshot(model)
+	if not model or not model:IsA("Model") or VMOrig[model] then return end
+	local d, r = vmParts(model)
+	if not d then return end
+	VMOrig[model] = { default = d.Value, rotation = r.Value }
+end
+
+local function vmApply(model)
+	local orig = model and VMOrig[model]
+	if not orig then return end
+	local d, r = vmParts(model)
+	if not d then return end
+	d.Value = Vector3.new(VMState.X, VMState.Y, VMState.Z)
+	r.Value = Vector3.new(orig.rotation.X, orig.rotation.Y, math.rad(VMState.Roll))
+end
+
+local function vmScan()
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+	for _, m in ipairs(cam:GetChildren()) do
+		vmSnapshot(m)
+		if VMState.Enabled then vmApply(m) end
+	end
+end
+
+local function vmRevert()
+	for mdl, orig in pairs(VMOrig) do
+		pcall(function()
+			if mdl and mdl.Parent then
+				local d, r = vmParts(mdl)
+				if d then
+					d.Value = orig.default
+					r.Value = orig.rotation
+				end
+			end
+		end)
+	end
+end
+
+VMState.Enabled = false
+vmRevert()
+
+local vmConn = nil
+
+local function vmInstall()
+	local cam = workspace.CurrentCamera
+	if not cam then return false end
+	if not vmConn then
+		vmConn = cam.ChildAdded:Connect(function(m)
+			task.defer(function()
+				vmSnapshot(m)
+				if VMState.Enabled then vmApply(m) end
+			end)
+		end)
+	end
+	vmScan()
+	return true
+end
+
+getgenv().ViewModelCleanup = function()
+	VMState.Enabled = false
+	if vmConn then
+		vmConn:Disconnect()
+		vmConn = nil
+	end
+	vmRevert()
+end
+
+task.spawn(function()
+	vmInstall()
+	while task.wait(1) do
+		if Library.Unloaded then return end
+		if not vmConn then vmInstall() end
+		vmScan()
+	end
+end)
+
+--== 右栏：自定义视角模型 ==
+local ViewmodelBox = Tab:AddRightGroupbox("自定义视角模型")
+
+ViewmodelBox:AddToggle("VM_Enable", {
+	Text = "启用自定义视角模型",
+	Default = VMState.Enabled,
+	Tooltip = "只改本机视角模型位置；关闭后立即恢复原样",
+	Callback = function(v)
+		VMState.Enabled = v
+		if v then vmScan() else vmRevert() end
+	end,
+})
+
+ViewmodelBox:AddSlider("VM_X", {
+	Text = "X（左右）",
+	Default = VMState.X, Min = -1, Max = 1, Rounding = 2,
+	Tooltip = "视角模型左右偏移，负数往另一边",
+	Callback = function(v)
+		VMState.X = v
+		if VMState.Enabled then vmScan() end
+	end,
+})
+
+ViewmodelBox:AddSlider("VM_Y", {
+	Text = "Y（上下）",
+	Default = VMState.Y, Min = -1, Max = 1, Rounding = 2,
+	Tooltip = "视角模型上下偏移",
+	Callback = function(v)
+		VMState.Y = v
+		if VMState.Enabled then vmScan() end
+	end,
+})
+
+ViewmodelBox:AddSlider("VM_Z", {
+	Text = "Z（前后）",
+	Default = VMState.Z, Min = -1, Max = 1, Rounding = 2,
+	Tooltip = "视角模型前后偏移",
+	Callback = function(v)
+		VMState.Z = v
+		if VMState.Enabled then vmScan() end
+	end,
+})
+
+ViewmodelBox:AddSlider("VM_Roll", {
+	Text = "滚转（度）",
+	Default = VMState.Roll, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Tooltip = "-180 ~ 180，等于完整一圈；0 = 不转",
+	Callback = function(v)
+		VMState.Roll = v
+		if VMState.Enabled then vmScan() end
+	end,
+})
+
+end -- ★ 节 6.7 结束
+
+--// ======================== 6.8 透明外观替换（本机） ========================
+do -- ★ 分节包裹
+
+local FORCEFIELD = Enum.Material.ForceField
+local WHITE = Color3.fromRGB(255, 255, 255)
+
+local APP = getgenv().AppearanceState
+if type(APP) ~= "table" then
+	APP = {}
+	getgenv().AppearanceState = APP
+end
+
+for _, g in ipairs({ "Gun", "Arm", "Sleeve", "Char", "C4" }) do
+	if APP[g .. "Alpha"] ~= nil then
+		APP[g .. "T"] = 1 - APP[g .. "Alpha"]
+		APP[g .. "Alpha"] = nil
+	end
+end
+
+for _, dead in ipairs({
+	"GunMat", "ArmMat", "SleeveMat", "CharMat", "C4Mat",
+	"CuffOn", "CuffKeysRaw", "CuffKeys", "HideCustom", "HideKeysRaw", "HideKeys",
+}) do
+	APP[dead] = nil
+end
+
+local function appColorEq(a, b)
+	return typeof(a) == "Color3"
+		and math.abs(a.R - b.R) < 0.01
+		and math.abs(a.G - b.G) < 0.01
+		and math.abs(a.B - b.B) < 0.01
+end
+for key, old in pairs({
+	GunColor = Color3.fromRGB(249, 233, 153),
+	ArmColor = Color3.fromRGB(249, 233, 153),
+	CharColor = Color3.fromRGB(249, 233, 153),
+	SleeveColor = Color3.fromRGB(216, 211, 204),
+	C4Color = Color3.fromRGB(249, 233, 153),
+}) do
+	if appColorEq(APP[key], old) then
+		APP[key] = WHITE
+	end
+end
+
+for k, v in pairs({
+	GunOn = false, GunColor = WHITE, GunT = 0,
+	ArmOn = false, ArmColor = WHITE,
+	SleeveOn = false, SleeveColor = WHITE,
+	CharOn = false, CharColor = WHITE, CharT = 0,
+	C4On = false, C4Color = WHITE, C4T = 0,
+	HideGun = false, HideArm = false, HideGlove = false, HideCuff = false,
+}) do
+	if APP[k] == nil then
+		APP[k] = v
+	end
+end
+
+local CUFF_KEYS = { "sleeve", "cuff", "wrist", "collar" }
+
+local DATA = getgenv().AppearanceData
+if type(DATA) ~= "table" then
+	DATA = {}
+	getgenv().AppearanceData = DATA
+end
+
+local HLDATA = getgenv().AppearanceHighlightData
+if type(HLDATA) ~= "table" then
+	HLDATA = {}
+	getgenv().AppearanceHighlightData = HLDATA
+end
+
+local SKIP_NAMES = {
+	ViewmodelLight = true, Hitbox = true, HumanoidRootPart = true,
+	Camera = true, CameraPart = true,
+}
+local SKIP_FOLDERS = {
+	AnimatedParts = true, Interactables = true,
+}
+
+local function appBlocked(part, model)
+	if SKIP_NAMES[part.Name] then
+		return true
+	end
+	local p = part.Parent
+	local guard = 0
+	while p and p ~= model and guard < 8 do
+		if SKIP_FOLDERS[p.Name] then
+			return true
+		end
+		p = p.Parent
+		guard += 1
+	end
+	return false
+end
+
+local function appLocalCharacter()
+	local c = LP.Character
+	if c and c.Parent then
+		return c
+	end
+	local chars = workspace:FindFirstChild("Characters")
+	return chars and chars:FindFirstChild(LP.Name) or nil
+end
+
+local function appPark(part, d, inst)
+	if not d.stripped then
+		d.stripped = {}
+	end
+	d.stripped[#d.stripped + 1] = { inst = inst, parent = part }
+	inst.Parent = nil
+end
+
+local function appStrip(part, d)
+	if d.stripped == nil then
+		d.stripped = {}
+	end
+	for _, c in ipairs(part:GetChildren()) do
+		if c:IsA("SurfaceAppearance") or c:IsA("Texture") or c:IsA("Decal") then
+			appPark(part, d, c)
+		end
+	end
+end
+
+local function appWant(d, tt)
+	if tt == nil then
+		return math.clamp(d.transp, 0, 1)
+	end
+	tt = math.clamp(tonumber(tt) or 0, 0, 1)
+	return math.clamp(d.transp + (1 - d.transp) * tt, 0, 1)
+end
+
+local function appEnforce(part, d)
+	if not d or not d.mode or not part.Parent then
+		return
+	end
+	local sa = part:FindFirstChildOfClass("SurfaceAppearance")
+	if sa then
+		appPark(part, d, sa)
+	end
+	local wantT = (d.mode == "hide") and 1 or d.wantT
+	if math.abs(part.Transparency - wantT) > 0.01 then
+		pcall(function()
+			part.Transparency = wantT
+		end)
+	end
+	if d.mode == "style" then
+		if part.Material ~= FORCEFIELD then
+			pcall(function()
+				part.Material = FORCEFIELD
+			end)
+		end
+		if d.setColor and part.Color ~= d.setColor then
+			pcall(function()
+				part.Color = d.setColor
+			end)
+		end
+	end
+end
+
+local function appHook(part, d)
+	if d.conn then
+		return
+	end
+	pcall(function()
+		d.conn = part:GetPropertyChangedSignal("Transparency"):Connect(function()
+			if d.mode then
+				appEnforce(part, d)
+			end
+		end)
+	end)
+end
+
+local function appStyle(part, model, mode, color, tt, ignoreFolders)
+	if not part:IsA("BasePart") then
+		return true
+	end
+	if SKIP_NAMES[part.Name] then
+		return true
+	end
+	if not ignoreFolders and appBlocked(part, model) then
+		return true
+	end
+	local d = DATA[part]
+	if not d then
+		if part.Transparency > 0.01 then
+			return false
+		end
+		d = {
+			mat = part.Material,
+			color = part.Color,
+			transp = part.Transparency,
+		}
+		DATA[part] = d
+	end
+	appStrip(part, d)
+	d.mode = mode
+	d.setColor = color
+	d.wantT = appWant(d, tt)
+	appHook(part, d)
+	appEnforce(part, d)
+	return true
+end
+
+local function appRestore(part)
+	local d = DATA[part]
+	if not d then
+		return
+	end
+	if d.conn then
+		pcall(function()
+			d.conn:Disconnect()
+		end)
+		d.conn = nil
+	end
+	d.mode = nil
+	pcall(function()
+		part.Material = d.mat
+		part.Color = d.color
+		part.Transparency = d.transp
+	end)
+	if d.stripped then
+		for _, s in ipairs(d.stripped) do
+			pcall(function()
+				if s.inst and s.parent and s.parent.Parent then
+					s.inst.Parent = s.parent
+				end
+			end)
+		end
+		d.stripped = nil
+	end
+end
+
+-- ★ v22 观战用：把记录全部还原并清空（清空后下次扫描会按当前状态重新快照，安全）
+local spectateMode = false
+local function appHardReset()
+	if getgenv().AppearanceEnforce then
+		pcall(getgenv().AppearanceEnforce, false)
+	end
+	for part in pairs(DATA) do
+		appRestore(part)
+	end
+	for part in pairs(DATA) do
+		DATA[part] = nil
+	end
+	for hl, rec in pairs(HLDATA) do
+		pcall(function()
+			if hl.Parent then
+				hl.FillTransparency = rec.fill
+				hl.OutlineTransparency = rec.outline
+			end
+		end)
+		HLDATA[hl] = nil
+	end
+end
+
+local function appIsCuff(part)
+	local hay = (part.Name or ""):lower()
+	local n = part.Parent
+	local guard = 0
+	while n and guard < 6 do
+		if n:IsA("Model") then
+			break
+		end
+		hay = hay .. "/" .. (n.Name or ""):lower()
+		n = n.Parent
+		guard += 1
+	end
+	for _, k in ipairs(CUFF_KEYS) do
+		if hay:find(k, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function appCollect(model)
+	local list, seen = {}, {}
+	local function push(p, kind)
+		if p:IsA("BasePart") and not seen[p] then
+			seen[p] = true
+			list[#list + 1] = { part = p, kind = kind }
+		end
+	end
+	local weapon = model:FindFirstChild("Weapon")
+	if weapon then
+		push(weapon, "gun")
+		for _, d in ipairs(weapon:GetDescendants()) do
+			push(d, "gun")
+		end
+	end
+	for _, armName in ipairs({ "Left Arm", "Right Arm" }) do
+		local arm = model:FindFirstChild(armName)
+		if arm and arm:IsA("BasePart") then
+			local glove = arm:FindFirstChild("Glove")
+			if glove then
+				push(glove, "glove")
+				for _, d in ipairs(glove:GetDescendants()) do
+					push(d, "glove")
+				end
+			end
+			push(arm, "arm")
+			for _, d in ipairs(arm:GetDescendants()) do
+				if d:IsA("BasePart") and not (glove and d:IsDescendantOf(glove)) then
+					push(d, "arm")
+				end
+			end
+		end
+	end
+	local dummies = model:FindFirstChild("DummyParts")
+	if dummies then
+		for _, d in ipairs(dummies:GetDescendants()) do
+			if d:IsA("MeshPart") and d.Transparency < 0.5 then
+				push(d, "arm")
+			end
+		end
+	end
+	return list
+end
+
+local function appIsC4Name(name)
+	return tostring(name or ""):lower():find("c4", 1, true) ~= nil
+end
+
+local function appCollectC4()
+	local list, seen = {}, {}
+	local function pushPart(p)
+		if p:IsA("BasePart") and not seen[p] and p.Transparency < 0.99 then
+			seen[p] = true
+			list[#list + 1] = p
+		end
+	end
+	local function isLimb(root, p)
+		local n = p
+		while n and n ~= root do
+			local nm = n.Name
+			if nm == "Left Arm" or nm == "Right Arm" or nm == "Glove" then
+				return true
+			end
+			n = n.Parent
+		end
+		return false
+	end
+	local function scanModel(m)
+		if isLimb(m, m) then
+			return
+		end
+		pushPart(m)
+		for _, d in ipairs(m:GetDescendants()) do
+			if not isLimb(m, d) then
+				pushPart(d)
+			end
+		end
+	end
+	local function scanContainer(container)
+		if not container then
+			return
+		end
+		for _, c in ipairs(container:GetChildren()) do
+			if (c:IsA("Model") or c:IsA("BasePart")) and appIsC4Name(c.Name) then
+				scanModel(c)
+			elseif c:IsA("Folder") and appIsC4Name(c.Name) then
+				for _, k in ipairs(c:GetChildren()) do
+					if k:IsA("Model") or k:IsA("BasePart") then
+						scanModel(k)
+					end
+				end
+			end
+		end
+	end
+	scanContainer(workspace.CurrentCamera)
+	scanContainer(workspace)
+	scanContainer(workspace:FindFirstChild("Debris"))
+	return list
+end
+
+local function appMuteHighlight(model, on)
+	local hl = model:FindFirstChild("ViewmodelHighlight")
+	if not hl or not hl:IsA("Highlight") then
+		return
+	end
+	if on then
+		if not HLDATA[hl] then
+			HLDATA[hl] = { fill = hl.FillTransparency, outline = hl.OutlineTransparency }
+		end
+		if hl.FillTransparency < 1 then
+			pcall(function()
+				hl.FillTransparency = 1
+			end)
+		end
+	elseif HLDATA[hl] then
+		local rec = HLDATA[hl]
+		pcall(function()
+			hl.FillTransparency = rec.fill
+			hl.OutlineTransparency = rec.outline
+		end)
+		HLDATA[hl] = nil
+	end
+end
+
+local function appHighlightEnforce()
+	for hl in pairs(HLDATA) do
+		if hl.Parent then
+			if hl.FillTransparency < 1 then
+				pcall(function()
+					hl.FillTransparency = 1
+				end)
+			end
+		else
+			HLDATA[hl] = nil
+		end
+	end
+end
+
+local function appApplyModel(model)
+	local pending = 0
+	local targets = appCollect(model)
+	local inTarget = {}
+	for _, t in ipairs(targets) do
+		inTarget[t.part] = true
+	end
+
+	for _, t in ipairs(targets) do
+		local p, kind = t.part, t.kind
+		if not appBlocked(p, model) then
+			local mode, color, tt
+			if kind == "gun" then
+				if APP.HideGun then
+					mode = "hide"
+				elseif APP.GunOn then
+					mode, color = "style", APP.GunColor
+				end
+			else
+				local hide = (kind == "glove" and APP.HideGlove)
+					or (kind == "arm" and APP.HideArm)
+					or (APP.HideCuff and appIsCuff(p))
+				if hide then
+					mode = "hide"
+				elseif kind == "glove" and APP.SleeveOn then
+					mode, color = "style", APP.SleeveColor
+				elseif kind == "arm" and APP.ArmOn then
+					mode, color = "style", APP.ArmColor
+				end
+			end
+			if mode then
+				if not appStyle(p, model, mode, color, tt) then
+					pending += 1
+				end
+			else
+				appRestore(p)
+			end
+		end
+	end
+
+	for part in pairs(DATA) do
+		if part.Parent and part:IsDescendantOf(model) and not inTarget[part] then
+			appRestore(part)
+		end
+	end
+
+	appMuteHighlight(model, APP.GunOn or APP.ArmOn or APP.SleeveOn)
+
+	return pending
+end
+
+local function appApplyC4()
+	local pending = 0
+	for _, p in ipairs(appCollectC4()) do
+		if APP.C4On then
+			if not appStyle(p, nil, "style", APP.C4Color, nil, true) then
+				pending += 1
+			end
+		else
+			appRestore(p)
+		end
+	end
+	return pending
+end
+
+local function appApplyCharacter()
+	local pending = 0
+	local char = appLocalCharacter()
+	if not char then
+		return pending
+	end
+	for _, p in ipairs(char:GetDescendants()) do
+		if p:IsA("BasePart") then
+			if APP.CharOn then
+				if not appStyle(p, char, "style", APP.CharColor, APP.CharT) then
+					pending += 1
+				end
+			else
+				appRestore(p)
+			end
+		end
+	end
+	return pending
+end
+
+local function appScan()
+	-- ★ v22 观战期间不写任何外观（否则会去抢被观战者 viewmodel 的材质 → 别人切刀时闪）
+	if isSpectating() then
+		return 0
+	end
+	local pending = 0
+	local cam = workspace.CurrentCamera
+	if cam then
+		for _, m in ipairs(cam:GetChildren()) do
+			if m:IsA("Model") then
+				pending += appApplyModel(m)
+			end
+		end
+	end
+	pending += appApplyCharacter()
+	pending += appApplyC4()
+	return pending
+end
+
+local function appRevert()
+	for part in pairs(DATA) do
+		appRestore(part)
+	end
+end
+
+getgenv().AppearanceCleanup = function()
+	APP.GunOn, APP.ArmOn, APP.SleeveOn, APP.CharOn, APP.C4On = false, false, false, false, false
+	APP.HideGun, APP.HideArm, APP.HideGlove, APP.HideCuff = false, false, false, false
+	if getgenv().AppearanceEnforce then
+		getgenv().AppearanceEnforce(false)
+	end
+	appRevert()
+	for hl, rec in pairs(HLDATA) do
+		pcall(function()
+			if hl.Parent then
+				hl.FillTransparency = rec.fill
+				hl.OutlineTransparency = rec.outline
+			end
+		end)
+		HLDATA[hl] = nil
+	end
+end
+
+local function appAnyOn()
+	return APP.GunOn or APP.ArmOn or APP.SleeveOn or APP.CharOn or APP.C4On
+		or APP.HideGun or APP.HideArm or APP.HideGlove or APP.HideCuff
+end
+
+local ENFORCE_BIND = "BeautifyAppearanceEnforce"
+pcall(function()
+	RunService:UnbindFromRenderStep(ENFORCE_BIND)
+end)
+
+local enforceBound = false
+local function appSetEnforce(on)
+	if on and not enforceBound then
+		enforceBound = true
+		pcall(function()
+			RunService:BindToRenderStep(ENFORCE_BIND, Enum.RenderPriority.Last.Value, function()
+				if spectateMode then
+					return -- ★ v22 观战期间不写
+				end
+				for part, d in pairs(DATA) do
+					if d.mode then
+						appEnforce(part, d)
+					end
+				end
+				appHighlightEnforce()
+			end)
+		end)
+	elseif not on and enforceBound then
+		enforceBound = false
+		pcall(function()
+			RunService:UnbindFromRenderStep(ENFORCE_BIND)
+		end)
+	end
+end
+getgenv().AppearanceEnforce = appSetEnforce
+
+local scanQueued = false
+local pendingLoop = false
+
+local function appRetryLoop()
+	if pendingLoop then
+		return
+	end
+	pendingLoop = true
+	task.spawn(function()
+		local waited = 0
+		while waited < 3 do
+			task.wait(0.1)
+			waited += 0.1
+			if Library.Unloaded then
+				break
+			end
+			if appScan() == 0 then
+				break
+			end
+		end
+		pendingLoop = false
+	end)
+end
+
+local function appRequestScan()
+	if scanQueued then
+		return
+	end
+	scanQueued = true
+	task.defer(function()
+		scanQueued = false
+		appSetEnforce(appAnyOn())
+		if appScan() > 0 then
+			appRetryLoop()
+		end
+	end)
+end
+
+getgenv().AppearanceReport = function()
+	local n = 0
+	for part, d in pairs(DATA) do
+		if d.mode and part.Parent then
+			n += 1
+			print(("%-52s mode=%s want=%.2f actual=%.2f mat=%s"):format(
+				part:GetFullName():sub(-52), d.mode, (d.mode == "hide") and 1 or d.wantT,
+				part.Transparency, tostring(part.Material)))
+		end
+	end
+	print(("[美化菜单] 正在生效的部件: %d"):format(n))
+	print(("[美化菜单] 删除枪械=%s  C4外观=%s"):format(
+		tostring(APP.HideGun), tostring(APP.C4On)))
+	local cam = workspace.CurrentCamera
+	if cam then
+		for _, m in ipairs(cam:GetChildren()) do
+			if m:IsA("Model") then
+				local hl = m:FindFirstChild("ViewmodelHighlight")
+				if hl then
+					print(("[美化菜单] %s 高光填充 FillTransparency=%.2f Enabled=%s"):format(
+						m.Name, hl.FillTransparency, tostring(hl.Enabled)))
+				end
+			end
+		end
+	end
+	local c4 = appCollectC4()
+	print(("[美化菜单] C4 命中部件: %d"):format(#c4))
+	for _, p in ipairs(c4) do
+		print(("    %s  T=%.2f  mat=%s"):format(p:GetFullName():sub(-48), p.Transparency, tostring(p.Material)))
+	end
+end
+
+getgenv().C4Probe = function()
+	local hits = 0
+	local function walk(root, depth)
+		if not root then
+			return
+		end
+		for _, c in ipairs(root:GetChildren()) do
+			if (c:IsA("Model") or c:IsA("BasePart")) and appIsC4Name(c.Name) then
+				hits += 1
+				print(("[C4] %s  [%s]"):format(c:GetFullName(), c.ClassName))
+				if c:IsA("BasePart") then
+					print(("      T=%.2f mat=%s"):format(c.Transparency, tostring(c.Material)))
+				end
+				for _, d in ipairs(c:GetDescendants()) do
+					if d:IsA("BasePart") then
+						print(("      %s [%s] T=%.2f mat=%s"):format(
+							d.Name, d.ClassName, d.Transparency, tostring(d.Material)))
+					end
+				end
+			elseif depth < 2 and (c:IsA("Folder") or c:IsA("Model")) then
+				walk(c, depth + 1)
+			end
+		end
+	end
+	walk(workspace, 0)
+	walk(workspace.CurrentCamera, 0)
+	print(("[C4] 命中 %d 个模型/部件；若为 0，把 C4 的正确名字发我"):format(hits))
+end
+
+appRevert()
+
+local appCamConn = nil
+local function appInstall()
+	local cam = workspace.CurrentCamera
+	if not cam or appCamConn then
+		return
+	end
+	appCamConn = cam.ChildAdded:Connect(function(m)
+		if m:IsA("Model") then
+			appRequestScan()
+		end
+	end)
+end
+appInstall()
+appRequestScan()
+
+-- ★ v22 观战状态机：进入观战立刻硬还原并停手；退出观战重新扫描
+task.spawn(function()
+	while task.wait(0.1) do
+		if Library.Unloaded then
+			return
+		end
+		local sp = isSpectating()
+		if sp and not spectateMode then
+			spectateMode = true
+			appHardReset()
+		elseif not sp and spectateMode then
+			spectateMode = false
+			appRequestScan()
+		end
+	end
+end)
+
+task.spawn(function()
+	while task.wait(1) do
+		if Library.Unloaded then
+			return
+		end
+		appInstall()
+		for part in pairs(DATA) do
+			if not part.Parent then
+				DATA[part] = nil
+			end
+		end
+		for hl in pairs(HLDATA) do
+			if not hl.Parent then
+				HLDATA[hl] = nil
+			end
+		end
+		appSetEnforce(appAnyOn())
+		appScan()
+	end
+end)
+
+--== 右栏：透明外观替换 ==
+local AppBox = Tab:AddRightGroupbox("透明外观替换")
+
+local gunT = AppBox:AddToggle("APP_GunOn", {
+	Text = "枪械外观",
+	Default = APP.GunOn,
+	Tooltip = "只改本机视角模型里的枪 / 刀本体",
+	Callback = function(v)
+		APP.GunOn = v
+		appRequestScan()
+	end,
+})
+gunT:AddColorPicker("APP_GunC", {
+	Default = APP.GunColor,
+	Title = "颜色",
+	Callback = function(c)
+		APP.GunColor = c
+		appRequestScan()
+	end,
+})
+
+AppBox:AddDivider()
+
+local armT = AppBox:AddToggle("APP_ArmOn", {
+	Text = "手臂外观",
+	Default = APP.ArmOn,
+	Tooltip = "只改手臂颜色 / 材质，不动透明程度",
+	Callback = function(v)
+		APP.ArmOn = v
+		appRequestScan()
+	end,
+})
+armT:AddColorPicker("APP_ArmC", {
+	Default = APP.ArmColor,
+	Title = "颜色",
+	Callback = function(c)
+		APP.ArmColor = c
+		appRequestScan()
+	end,
+})
+
+AppBox:AddDivider()
+
+local sleeveT = AppBox:AddToggle("APP_SleeveOn", {
+	Text = "手套外观",
+	Default = APP.SleeveOn,
+	Tooltip = "只改手套颜色 / 材质，不动透明程度",
+	Callback = function(v)
+		APP.SleeveOn = v
+		appRequestScan()
+	end,
+})
+sleeveT:AddColorPicker("APP_SleeveC", {
+	Default = APP.SleeveColor,
+	Title = "颜色",
+	Callback = function(c)
+		APP.SleeveColor = c
+		appRequestScan()
+	end,
+})
+
+AppBox:AddDivider()
+
+local charT = AppBox:AddToggle("APP_CharOn", {
+	Text = "角色外观",
+	Default = APP.CharOn,
+	Tooltip = "只改本机角色（其他人看不到）",
+	Callback = function(v)
+		APP.CharOn = v
+		appRequestScan()
+	end,
+})
+charT:AddColorPicker("APP_CharC", {
+	Default = APP.CharColor,
+	Title = "颜色",
+	Callback = function(c)
+		APP.CharColor = c
+		appRequestScan()
+	end,
+})
+AppBox:AddSlider("APP_CharT", {
+	Text = "角色透明程度",
+	Default = APP.CharT, Min = 0, Max = 1, Rounding = 2,
+	Tooltip = "0 = 保持原样，1 = 完全透明",
+	Callback = function(v)
+		APP.CharT = v
+		appRequestScan()
+	end,
+})
+
+AppBox:AddDivider()
+
+local c4T = AppBox:AddToggle("APP_C4On", {
+	Text = "C4 外观",
+	Default = APP.C4On,
+	Tooltip = "改手持 / 地面 C4 的颜色（仅本机可见，不碰手臂 / 手套）",
+	Callback = function(v)
+		APP.C4On = v
+		appRequestScan()
+	end,
+})
+c4T:AddColorPicker("APP_C4C", {
+	Default = APP.C4Color,
+	Title = "C4 颜色",
+	Callback = function(c)
+		APP.C4Color = c
+		appRequestScan()
+	end,
+})
+
+AppBox:AddDivider()
+
+AppBox:AddToggle("APP_HideGun", {
+	Text = "删除枪械",
+	Default = APP.HideGun,
+	Tooltip = "隐藏枪 / 刀本体（不需要开枪械外观）",
+	Callback = function(v)
+		APP.HideGun = v
+		appRequestScan()
+	end,
+})
+
+AppBox:AddToggle("APP_HideArm", {
+	Text = "删除手臂",
+	Default = APP.HideArm,
+	Tooltip = "隐藏整条手臂",
+	Callback = function(v)
+		APP.HideArm = v
+		appRequestScan()
+	end,
+})
+
+AppBox:AddToggle("APP_HideGlove", {
+	Text = "删除手套",
+	Default = APP.HideGlove,
+	Tooltip = "只隐藏 Glove 部件",
+	Callback = function(v)
+		APP.HideGlove = v
+		appRequestScan()
+	end,
+})
+
+AppBox:AddToggle("APP_HideCuff", {
+	Text = "删除袖口",
+	Default = APP.HideCuff,
+	Tooltip = "按内置关键字隐藏袖口类部件（sleeve / cuff / wrist / collar）",
+	Callback = function(v)
+		APP.HideCuff = v
+		appRequestScan()
+	end,
+})
+
+end -- ★ 节 6.8 结束
+
+--// ======================== 6.9 玩家 · 摄像机功能 ========================
+do -- ★ 分节包裹
+
+local CAMS = getgenv().CameraState
+if type(CAMS) ~= "table" then
+	CAMS = {}
+	getgenv().CameraState = CAMS
+end
+for k, v in pairs({
+	TP = false,
+	Dist = 5.5,
+	ShowHands = true,
+	Occlude = true,
+	Wide = 1.0,
+	FOV = 70,
+	HideHead = true,
+}) do
+	if CAMS[k] == nil then
+		CAMS[k] = v
+	end
+end
+CAMS.Height = nil
+CAMS.FovBase = nil
+CAMS.FovApplied = false
+CAMS.FovHoldStart = nil
+
+CAMS.minDistance = 2.0
+CAMS.hideBelow = 2.5
+CAMS.fpBelow = 1.5
+CAMS.distLerp = 18
+CAMS.occludePad = 0.35
+
+-- ---------- LocalTransparencyModifier ----------
+local ltmSaved, ltmWanted = {}, {}
+
+local function camSetLTM(part, v)
+	if v == nil then
+		local orig = ltmSaved[part]
+		if orig ~= nil then
+			ltmSaved[part], ltmWanted[part] = nil, nil
+			pcall(function()
+				part.LocalTransparencyModifier = orig
+			end)
+		end
+		return
+	end
+	if ltmWanted[part] == v then
+		return
+	end
+	if ltmSaved[part] == nil then
+		local ok, cur = pcall(function()
+			return part.LocalTransparencyModifier
+		end)
+		ltmSaved[part] = ok and cur or 0
+	end
+	ltmWanted[part] = v
+	pcall(function()
+		if part.LocalTransparencyModifier ~= v then
+			part.LocalTransparencyModifier = v
+		end
+	end)
+end
+
+local function camPruneLTM()
+	for p in pairs(ltmWanted) do
+		if p.Parent == nil then
+			ltmWanted[p], ltmSaved[p] = nil, nil
+		end
+	end
+end
+
+local function camRestoreLTM()
+	for part, v in pairs(ltmSaved) do
+		pcall(function()
+			part.LocalTransparencyModifier = v
+		end)
+	end
+	ltmSaved, ltmWanted = {}, {}
+end
+
+-- ---------- 锚点 ----------
+local function camAnchor()
+	local char = LP.Character
+	if not (char and char.Parent) then
+		return nil, nil, nil
+	end
+	local cp = char:FindFirstChild("CameraPart")
+	if cp and cp:IsA("BasePart") then
+		return cp, cp.Position, char
+	end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return root, root.Position + Vector3.new(0, 1.85, 0), char
+	end
+	return nil, nil, char
+end
+
+-- ---------- 遮挡射线 ----------
+local camRay = RaycastParams.new()
+camRay.FilterType = Enum.RaycastFilterType.Exclude
+camRay.IgnoreWater = true
+
+local function camRefreshFilter(cam)
+	local list = { cam }
+	local f = workspace:FindFirstChild("Characters")
+	if f then
+		list[#list + 1] = f
+	end
+	camRay.FilterDescendantsInstances = list
+end
+
+-- ---------- 零件缓存 ----------
+local camCache = { body = {}, vm = {}, vmNames = {}, t = -1 }
+
+local function camRefreshCache(cam)
+	local now = os.clock()
+	if now - camCache.t < 0.1 then
+		return
+	end
+	camCache.t = now
+
+	camCache.body = {}
+	local char = LP.Character
+	if char then
+		for _, d in ipairs(char:GetDescendants()) do
+			if d:IsA("BasePart") then
+				camCache.body[#camCache.body + 1] = d
+			end
+		end
+	end
+
+	camCache.vm, camCache.vmNames = {}, {}
+	for _, m in ipairs(cam:GetChildren()) do
+		if m:IsA("Model") then
+			local n = 0
+			for _, d in ipairs(m:GetDescendants()) do
+				if d:IsA("BasePart") then
+					n += 1
+					camCache.vm[#camCache.vm + 1] = d
+				end
+			end
+			if n > 0 then
+				camCache.vmNames[#camCache.vmNames + 1] = m.Name
+			end
+		end
+	end
+end
+
+-- ---------- 正交基重建 ----------
+local function camCleanRotation(r0)
+	local rx = r0.RightVector
+	local uy = r0.UpVector
+	if rx.Magnitude < 0.5 or uy.Magnitude < 0.5 then
+		return r0
+	end
+	return CFrame.fromMatrix(Vector3.zero, rx.Unit, uy.Unit)
+end
+
+-- ---------- 真·广角（FOV）----------
+local fovHookCam, fovHookConn = nil, nil
+
+local function camEnsureFovHook(cam)
+	if fovHookCam == cam and fovHookConn then
+		return
+	end
+	if fovHookConn then
+		pcall(function()
+			fovHookConn:Disconnect()
+		end)
+	end
+	fovHookCam = cam
+	fovHookConn = cam:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+		local v = cam.FieldOfView
+		if CAMS.FOV > 70.01 and math.abs(v - CAMS.FOV) < 0.01 then
+			return
+		end
+		if CAMS.FovBase == nil or v > CAMS.FovBase + 0.5 then
+			CAMS.FovBase = v
+		end
+	end)
+end
+
+local function camRestoreFOV()
+	if not CAMS.FovApplied then
+		return
+	end
+	CAMS.FovApplied = false
+	local cam = workspace.CurrentCamera
+	if cam and CAMS.FovBase then
+		pcall(function()
+			cam.FieldOfView = CAMS.FovBase
+		end)
+	end
+end
+
+local function camStepFOV(cam)
+	if CAMS.FOV <= 70.01 then
+		camRestoreFOV()
+		return
+	end
+	camEnsureFovHook(cam)
+	local cur = cam.FieldOfView
+	local base = CAMS.FovBase or cur
+	local holding = cur < base - 1
+	if holding then
+		CAMS.FovHoldStart = CAMS.FovHoldStart or os.clock()
+		if os.clock() - CAMS.FovHoldStart > 3 then
+			CAMS.FovBase = cur
+			CAMS.FovHoldStart = nil
+		end
+	else
+		CAMS.FovHoldStart = nil
+		if math.abs(cur - CAMS.FOV) > 0.01 then
+			pcall(function()
+				cam.FieldOfView = CAMS.FOV
+			end)
+		end
+		CAMS.FovApplied = true
+	end
+end
+
+-- ---------- 主循环 ----------
+local CAM_BIND = "BeautifyCameraFunction"
+pcall(function()
+	RunService:UnbindFromRenderStep(CAM_BIND)
+end)
+
+local camBound = false
+local camCurDist = CAMS.Dist
+local camSetBound
+
+local function camStep(dt)
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	-- ★ v22：观战时让行（不写相机），退出观战自动恢复
+	local wantTP = CAMS.TP and not isSpectating()
+	local wantWide = math.abs((CAMS.Wide or 1) - 1) > 0.001
+	local wantFOV = CAMS.FOV > 70.01
+	if not wantTP and not wantWide and not wantFOV then
+		return
+	end
+
+	local ok, err = pcall(function()
+		local rot = camCleanRotation(cam.CFrame.Rotation)
+		local baseCf = CFrame.new(cam.CFrame.Position) * rot
+
+		if wantTP then
+			camRefreshCache(cam)
+			camPruneLTM()
+
+			local cp, anchorPos, char = camAnchor()
+			if not cp then
+				camRestoreLTM()
+				return
+			end
+
+			local look = rot.LookVector
+
+			local want = CAMS.Dist
+			if CAMS.Occlude and want > 0.01 then
+				camRefreshFilter(cam)
+				local hit = workspace:Raycast(anchorPos, -look * want, camRay)
+				if hit then
+					want = math.max(CAMS.minDistance,
+						math.min(want, (hit.Position - anchorPos).Magnitude - CAMS.occludePad))
+				end
+			end
+
+			local k = math.min(1, math.max(0, (dt or 1 / 60) * CAMS.distLerp))
+			camCurDist += (want - camCurDist) * k
+			if math.abs(camCurDist - want) < 0.01 then
+				camCurDist = want
+			end
+
+			local p = anchorPos - look * camCurDist
+			baseCf = CFrame.new(p) * rot
+
+			local head = char and char:FindFirstChild("Head")
+			local fp = camCurDist < CAMS.fpBelow
+			for _, d in ipairs(camCache.body) do
+				if d.Parent and d.Transparency < 1 then
+					local v = 0
+					if fp or (d == head and CAMS.HideHead and camCurDist < CAMS.hideBelow) then
+						v = 1
+					end
+					camSetLTM(d, v)
+				end
+			end
+
+			local hasWeapon = #camCache.vmNames > 0
+			local showVM
+			if fp then
+				showVM = true
+			elseif CAMS.ShowHands then
+				showVM = hasWeapon
+			else
+				showVM = false
+			end
+			for _, d in ipairs(camCache.vm) do
+				if d.Parent and d.Transparency < 1 then
+					camSetLTM(d, (showVM and 0) or 1)
+				end
+			end
+		elseif next(ltmSaved) then
+			camRestoreLTM()
+		end
+
+		if wantWide then
+			baseCf = baseCf * CFrame.new(0, 0, 0, 1, 0, 0, 0, CAMS.Wide, 0, 0, 0, 1)
+		end
+
+		if wantTP or wantWide then
+			cam.CFrame = baseCf
+		end
+
+		camStepFOV(cam)
+	end)
+
+	if not ok then
+		warn("[摄像机功能] 运行出错，已自动关闭：" .. tostring(err))
+		CAMS.TP = false
+		CAMS.Wide = 1
+		CAMS.FOV = 70
+		camRestoreLTM()
+		camRestoreFOV()
+		camSetBound(false)
+	end
+end
+
+camSetBound = function(on)
+	if on and not camBound then
+		camBound = true
+		camCurDist = CAMS.Dist
+		pcall(function()
+			RunService:BindToRenderStep(CAM_BIND, Enum.RenderPriority.Last.Value, camStep)
+		end)
+	elseif not on and camBound then
+		camBound = false
+		pcall(function()
+			RunService:UnbindFromRenderStep(CAM_BIND)
+		end)
+	end
+end
+
+local function camActive()
+	return CAMS.TP
+		or math.abs((CAMS.Wide or 1) - 1) > 0.001
+		or CAMS.FOV > 70.01
+end
+
+local function camSync()
+	camSetBound(camActive())
+	if not camActive() then
+		camRestoreLTM()
+		camRestoreFOV()
+	end
+end
+
+getgenv().CameraCleanup = function()
+	CAMS.TP = false
+	CAMS.Wide = 1
+	CAMS.FOV = 70
+	camSetBound(false)
+	camRestoreLTM()
+	camRestoreFOV()
+	CAMS.FovBase = nil
+	CAMS.FovHoldStart = nil
+end
+
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	if camActive() then
+		camSync()
+	end
+end)
+LP.CharacterAdded:Connect(function()
+	task.delay(0.3, function()
+		if camActive() then
+			camSync()
+		end
+	end)
+end)
+
+--== 玩家页：摄像机功能 ==
+local CamBox = Tabs.Player:AddLeftGroupbox("摄像机功能")
+
+local TP_Toggle = CamBox:AddToggle("TP_Enabled", {
+	Text = "启用第三人称",
+	Default = CAMS.TP,
+	Tooltip = "只改本机相机；关闭后立即还原视角与透明度；观战时自动让行",
+	Callback = function(v)
+		CAMS.TP = v
+		camSync()
+		if v then
+			Library:Notify("第三人称已启用", 2)
+		else
+			Library:Notify("第三人称已关闭，视角已还原", 2)
+		end
+	end,
+})
+
+do
+	local ok, res = pcall(function()
+		return TP_Toggle:AddKeyPicker("TP_Key", {
+			Default = "none",
+			SyncToggleState = true,
+			Mode = "Toggle",
+			Text = "第三人称开关",
+		})
+	end)
+	if not (ok and res) then
+		local ok2, res2 = pcall(function()
+			return CamBox:AddLabel("第三人称按键"):AddKeyPicker("TP_Key", {
+				Default = "none",
+				SyncToggleState = false,
+				Mode = "Toggle",
+				Text = "第三人称开关",
+				Callback = function()
+					Toggles.TP_Enabled:SetValue(not CAMS.TP)
+				end,
+			})
+		end)
+		if not (ok2 and res2) then
+			warn("[摄像机功能] 无法创建按键绑定，只能点 UI 开关")
+		end
+	end
+end
+
+CamBox:AddDivider()
+
+CamBox:AddSlider("TP_Distance", {
+	Text = "第三人称距离",
+	Default = CAMS.Dist, Min = 5.5, Max = 25, Rounding = 1, Suffix = " studs",
+	Tooltip = "最小 5.5，不会退到第一人称；贴墙时自动拉近（内部下限 2）",
+	Callback = function(v)
+		CAMS.Dist = v
+	end,
+})
+
+CamBox:AddSlider("TP_Wide", {
+	Text = "宽比高（1.00 = 原始，越小越宽）",
+	Default = CAMS.Wide, Min = 0.5, Max = 1.0, Rounding = 2,
+	Tooltip = "纵向压缩画面得到「宽比高」；1.00 为关闭。可单独开，不依赖第三人称",
+	Callback = function(v)
+		CAMS.Wide = v
+		camSync()
+	end,
+})
+
+CamBox:AddSlider("TP_Fov", {
+	Text = "视野 FOV",
+	Default = CAMS.FOV, Min = 70, Max = 120, Rounding = 0,
+	Tooltip = "扩大视野范围（真·广角）；70 = 关闭。开镜时游戏会压低 FOV，本功能自动让行不干扰",
+	FormatDisplayValue = function(slider, value)
+		if value <= 70.01 then
+			return "关闭"
+		end
+		return tostring(value)
+	end,
+	Callback = function(v)
+		CAMS.FOV = v
+		camSync()
+	end,
+})
+
+CamBox:AddDivider()
+
+CamBox:AddToggle("TP_ShowHands", {
+	Text = "显示手持（手 + 枪）",
+	Default = CAMS.ShowHands,
+	Tooltip = "关掉后第三人称只显示身体（想要角色手里有枪，用下面的「第三人称手持模型」）",
+	Callback = function(v)
+		CAMS.ShowHands = v
+	end,
+})
+
+CamBox:AddToggle("TP_Occlude", {
+	Text = "贴墙自动拉近",
+	Default = CAMS.Occlude,
+	Tooltip = "身后被墙挡住时把相机拉近，避免穿墙看到远处",
+	Callback = function(v)
+		CAMS.Occlude = v
+	end,
+})
+
+camSync()
+
+end -- ★ 节 6.9 结束
+
+--// ======================== 6.10 世界 · 滤镜（本机） ========================
+do
+
+local Lighting = game:GetService("Lighting")
+
+local WorldOrig = getgenv().WorldOrig
+if type(WorldOrig) ~= "table" then
+	local atm0 = Lighting:FindFirstChildOfClass("Atmosphere")
+	WorldOrig = {
+		Ambient = Lighting.Ambient,
+		OutdoorAmbient = Lighting.OutdoorAmbient,
+		ExposureCompensation = Lighting.ExposureCompensation,
+		Brightness = Lighting.Brightness,
+		ClockTime = Lighting.ClockTime,
+		AtmHaze = atm0 and atm0.Haze or 0,
+		AtmGlare = atm0 and atm0.Glare or 0,
+		AtmColor = atm0 and atm0.Color or nil,
+		AtmDecay = atm0 and atm0.Decay or nil,
+		HadAtmosphere = atm0 ~= nil,
+		CreatedAtm = false,
+	}
+	getgenv().WorldOrig = WorldOrig
+else
+	pcall(function()
+		Lighting.Ambient = WorldOrig.Ambient
+		Lighting.OutdoorAmbient = WorldOrig.OutdoorAmbient
+		Lighting.ExposureCompensation = WorldOrig.ExposureCompensation
+		Lighting.Brightness = WorldOrig.Brightness
+		Lighting.ClockTime = WorldOrig.ClockTime
+		local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+		if atm then
+			atm.Haze = WorldOrig.AtmHaze or 0
+			atm.Glare = WorldOrig.AtmGlare or 0
+			if WorldOrig.AtmColor then atm.Color = WorldOrig.AtmColor end
+			if WorldOrig.AtmDecay then atm.Decay = WorldOrig.AtmDecay end
+		end
+		if WorldOrig.CreatedAtm and not WorldOrig.HadAtmosphere then
+			local a = Lighting:FindFirstChildOfClass("Atmosphere")
+			if a then a:Destroy() end
+			WorldOrig.CreatedAtm = false
+		end
+	end)
+end
+
+local WS = getgenv().WorldState
+if type(WS) ~= "table" then
+	WS = {}
+	getgenv().WorldState = WS
+end
+for k, v in pairs({
+	AmbIn = false, AmbInColor = Color3.fromRGB(100, 155, 255),
+	AmbOut = false, AmbOutColor = Color3.fromRGB(100, 155, 255),
+	Haze = false, HazeColor = Color3.fromRGB(141, 255, 60), HazeStrength = 1.5,
+	Glare = false, GlareColor = Color3.fromRGB(100, 155, 255), GlareStrength = 1.4,
+	Exposure = false, ExposureValue = 0,
+	Brightness = false, BrightnessValue = WorldOrig.Brightness,
+	Clock = false, ClockValue = WorldOrig.ClockTime,
+}) do
+	if WS[k] == nil then
+		WS[k] = v
+	end
+end
+
+local function worldAtm()
+	local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+	if atm then
+		return atm
+	end
+	local ok, new = pcall(function()
+		local a = Instance.new("Atmosphere")
+		a.Parent = Lighting
+		return a
+	end)
+	if ok and new then
+		WorldOrig.CreatedAtm = true
+		return new
+	end
+	return nil
+end
+
+local function worldApply()
+	pcall(function()
+		Lighting.Ambient = WS.AmbIn and WS.AmbInColor or WorldOrig.Ambient
+		Lighting.OutdoorAmbient = WS.AmbOut and WS.AmbOutColor or WorldOrig.OutdoorAmbient
+		Lighting.ExposureCompensation = WS.Exposure and WS.ExposureValue or WorldOrig.ExposureCompensation
+		Lighting.Brightness = WS.Brightness and WS.BrightnessValue or WorldOrig.Brightness
+		Lighting.ClockTime = WS.Clock and WS.ClockValue or WorldOrig.ClockTime
+
+		local atm = (WS.Haze or WS.Glare) and worldAtm() or Lighting:FindFirstChildOfClass("Atmosphere")
+		if not atm then
+			return
+		end
+		if WS.Haze then
+			atm.Haze = WS.HazeStrength
+			atm.Color = WS.HazeColor
+		else
+			atm.Haze = WorldOrig.AtmHaze or 0
+			if WorldOrig.AtmColor then atm.Color = WorldOrig.AtmColor end
+		end
+		if WS.Glare then
+			atm.Glare = WS.GlareStrength
+			atm.Decay = WS.GlareColor
+		else
+			atm.Glare = WorldOrig.AtmGlare or 0
+			if WorldOrig.AtmDecay then atm.Decay = WorldOrig.AtmDecay end
+		end
+		if not (WS.Haze or WS.Glare) and WorldOrig.CreatedAtm then
+			pcall(function()
+				atm:Destroy()
+			end)
+			WorldOrig.CreatedAtm = false
+		end
+	end)
+end
+
+local function worldAnyOn()
+	return WS.AmbIn or WS.AmbOut or WS.Haze or WS.Glare
+		or WS.Exposure or WS.Brightness or WS.Clock
+end
+
+getgenv().WorldReport = function()
+	local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+	print(("[世界] 室内光=%s 室外光=%s 雾=%s 眩光=%s 曝光=%s 亮度=%s 时间=%s"):format(
+		tostring(WS.AmbIn), tostring(WS.AmbOut), tostring(WS.Haze), tostring(WS.Glare),
+		tostring(WS.Exposure), tostring(WS.Brightness), tostring(WS.Clock)))
+	print(("[世界] Ambient=%s Outdoor=%s 曝光=%.2f 亮度=%.2f 时间=%.2f | Atmosphere=%s"):format(
+		tostring(Lighting.Ambient), tostring(Lighting.OutdoorAmbient),
+		Lighting.ExposureCompensation, Lighting.Brightness, Lighting.ClockTime,
+		atm and ("Haze=%.2f Glare=%.2f"):format(atm.Haze, atm.Glare) or "无"))
+	print(("[世界] 原始值: 曝光=%.2f 亮度=%.2f 时间=%.2f HadAtmosphere=%s CreatedAtm=%s"):format(
+		WorldOrig.ExposureCompensation, WorldOrig.Brightness, WorldOrig.ClockTime,
+		tostring(WorldOrig.HadAtmosphere), tostring(WorldOrig.CreatedAtm)))
+end
+
+getgenv().WorldCleanup = function()
+	WS.AmbIn, WS.AmbOut, WS.Haze, WS.Glare = false, false, false, false
+	WS.Exposure, WS.Brightness, WS.Clock = false, false, false
+	worldApply()
+end
+
+task.spawn(function()
+	while task.wait(1) do
+		if Library.Unloaded then
+			return
+		end
+		if worldAnyOn() then
+			worldApply()
+		end
+	end
+end)
+
+local WorldBox = Tabs.World:AddLeftGroupbox("世界滤镜")
+
+local inT = WorldBox:AddToggle("W_AmbIn", {
+	Text = "室内环境光",
+	Default = WS.AmbIn,
+	Tooltip = "改本机室内环境光颜色（阴影 / 暗部）",
+	Callback = function(v)
+		WS.AmbIn = v
+		worldApply()
+	end,
+})
+inT:AddColorPicker("W_AmbInC", {
+	Default = WS.AmbInColor,
+	Title = "室内颜色",
+	Callback = function(c)
+		WS.AmbInColor = c
+		worldApply()
+	end,
+})
+
+local outT = WorldBox:AddToggle("W_AmbOut", {
+	Text = "室外环境光",
+	Default = WS.AmbOut,
+	Tooltip = "改本机室外环境光颜色",
+	Callback = function(v)
+		WS.AmbOut = v
+		worldApply()
+	end,
+})
+outT:AddColorPicker("W_AmbOutC", {
+	Default = WS.AmbOutColor,
+	Title = "室外颜色",
+	Callback = function(c)
+		WS.AmbOutColor = c
+		worldApply()
+	end,
+})
+
+WorldBox:AddDivider()
+
+local hazeT = WorldBox:AddToggle("W_Haze", {
+	Text = "雾",
+	Default = WS.Haze,
+	Tooltip = "场景起雾；原游戏没有 Atmosphere 时会自动新建一个（关掉即销毁）",
+	Callback = function(v)
+		WS.Haze = v
+		worldApply()
+	end,
+})
+hazeT:AddColorPicker("W_HazeC", {
+	Default = WS.HazeColor,
+	Title = "雾颜色",
+	Callback = function(c)
+		WS.HazeColor = c
+		worldApply()
+	end,
+})
+WorldBox:AddSlider("W_HazeS", {
+	Text = "雾浓度",
+	Default = WS.HazeStrength, Min = 0, Max = 10, Rounding = 1,
+	Callback = function(v)
+		WS.HazeStrength = v
+		if WS.Haze then worldApply() end
+	end,
+})
+
+WorldBox:AddDivider()
+
+local glareT = WorldBox:AddToggle("W_Glare", {
+	Text = "眩光",
+	Default = WS.Glare,
+	Tooltip = "光源泛光（Atmosphere.Decay）",
+	Callback = function(v)
+		WS.Glare = v
+		worldApply()
+	end,
+})
+glareT:AddColorPicker("W_GlareC", {
+	Default = WS.GlareColor,
+	Title = "眩光颜色",
+	Callback = function(c)
+		WS.GlareColor = c
+		worldApply()
+	end,
+})
+WorldBox:AddSlider("W_GlareS", {
+	Text = "眩光强度",
+	Default = WS.GlareStrength, Min = 0, Max = 10, Rounding = 1,
+	Callback = function(v)
+		WS.GlareStrength = v
+		if WS.Glare then worldApply() end
+	end,
+})
+
+WorldBox:AddDivider()
+
+WorldBox:AddToggle("W_Exposure", {
+	Text = "曝光",
+	Default = WS.Exposure,
+	Tooltip = "整体明暗补偿",
+	Callback = function(v)
+		WS.Exposure = v
+		worldApply()
+	end,
+})
+WorldBox:AddSlider("W_ExposureV", {
+	Text = "曝光值",
+	Default = WS.ExposureValue, Min = -3, Max = 3, Rounding = 1,
+	Tooltip = "负数更暗，正数更亮",
+	Callback = function(v)
+		WS.ExposureValue = v
+		if WS.Exposure then worldApply() end
+	end,
+})
+
+WorldBox:AddToggle("W_Bright", {
+	Text = "亮度",
+	Default = WS.Brightness,
+	Tooltip = "默认跟随当前环境亮度，打开开关才生效",
+	Callback = function(v)
+		WS.Brightness = v
+		worldApply()
+	end,
+})
+WorldBox:AddSlider("W_BrightV", {
+	Text = "亮度值",
+	Default = WS.BrightnessValue, Min = 0, Max = 10, Rounding = 1,
+	Callback = function(v)
+		WS.BrightnessValue = v
+		if WS.Brightness then worldApply() end
+	end,
+})
+
+WorldBox:AddToggle("W_Clock", {
+	Text = "时间",
+	Default = WS.Clock,
+	Tooltip = "改本机太阳位置（白天 / 黄昏 / 夜晚）",
+	Callback = function(v)
+		WS.Clock = v
+		worldApply()
+	end,
+})
+WorldBox:AddSlider("W_ClockV", {
+	Text = "时间点",
+	Default = WS.ClockValue, Min = 0, Max = 24, Rounding = 1, Suffix = " 时",
+	Tooltip = "0 / 24 = 午夜，6 = 日出，12 = 正午，18 = 日落",
+	Callback = function(v)
+		WS.ClockValue = v
+		if WS.Clock then worldApply() end
+	end,
+})
+
+end -- ★ 节 6.10 结束
+
+--// ======================== 6.11 第三人称手持模型（本机） ========================
+-- 探测结论（Dex/RemoteSpy 实测）：
+--   * 游戏把角色武器挂在 workspace.Debris.<玩家名>_Weapon.Weapon，
+--     用 Motor6D 焊到 RightHand；每把枪的 C0 都不同（不能写死）
+--   * Character.WeaponModel / WeaponAttachments 永远是空的，别去那里找
+--   * 工厂 Skins.GetCharacterModel(武器名, "Stock") 返回的模型，零件名与尺寸
+--     与远程玩家手里的枪完全一致（"Vanilla" 返回 nil，必须用 "Stock"）
+-- 本实现：
+--   1) 工厂造模型（优先用你配的皮肤，其次 Stock）→ 放 workspace.Debris.<你>_Weapon
+--   2) 扫远程玩家的 RightHand，找零件名集合与我们的模型一致的枪 → 抄它的 C0/C1 与 Part0/Part1 角色
+--   3) 抄不到（场上没人拿同款枪）→ 用滑块兜底偏移
+-- 仅本机：客户端建立的实例不会复制给其他玩家
+do
+
+local TPW = getgenv().TPWeaponState
+if type(TPW) ~= "table" then
+	TPW = {}
+	getgenv().TPWeaponState = TPW
+end
+for k, v in pairs({
+	On = false,
+	UseNative = true,
+	Scale = 15,
+	NoFactory = false,
+	ForceFactory = false,
+	PosX = 0, PosY = 0, PosZ = 0, RotX = 0, RotY = 0, RotZ = 0,
+}) do
+	if TPW[k] == nil then
+		TPW[k] = v
+	end
+end
+
+local tpModel, tpWeld, tpName, tpBuilt, tpErr, tpSrcTag = nil, nil, nil, 0, nil, nil
+
+local function tpClear()
+	if tpWeld then
+		pcall(function() tpWeld:Destroy() end)
+		tpWeld = nil
+	end
+	if tpModel then
+		pcall(function() tpModel:Destroy() end)
+		tpModel = nil
+	end
+	local box = workspace:FindFirstChild("Debris")
+	box = box and box:FindFirstChild(LP.Name .. "_Weapon")
+	if box then
+		pcall(function() box:Destroy() end)
+	end
+	tpName, tpSrcTag = nil, nil
+end
+
+local function tpOffset()
+	return CFrame.new(TPW.PosX, TPW.PosY, TPW.PosZ)
+		* CFrame.Angles(math.rad(TPW.RotX), math.rad(TPW.RotY), math.rad(TPW.RotZ))
+end
+
+local function tpWeaponName()
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return nil
+	end
+	local best
+	for _, m in ipairs(cam:GetChildren()) do
+		if m:IsA("Model") and m:FindFirstChild("Weapon") then
+			best = m.Name
+		end
+	end
+	return best
+end
+
+local function tpSkinsLib()
+	local node = RS
+	for _, seg in ipairs({ "Database", "Components", "Libraries", "Skins" }) do
+		node = node and node:FindFirstChild(seg)
+	end
+	if not (node and node:IsA("ModuleScript")) then
+		return nil
+	end
+	local ok, lib = pcall(require, node)
+	if ok and type(lib) == "table" and type(lib.GetCharacterModel) == "function" then
+		return lib
+	end
+	return nil
+end
+
+local function tpCount(inst)
+	local n = 0
+	if inst:IsA("BasePart") then
+		n += 1
+	end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			n += 1
+		end
+	end
+	return n
+end
+
+-- 零件名集合指纹：用来判断「远程玩家手里的是不是同款枪」
+local function tpKey(inst)
+	local t = {}
+	if inst:IsA("BasePart") then
+		t[#t + 1] = inst.Name
+	end
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("BasePart") then
+			t[#t + 1] = d.Name
+		end
+	end
+	table.sort(t)
+	return table.concat(t, ",")
+end
+
+-- 修剪：去掉相机 / 灯光 / 手部；拆掉指向模型外部的悬空关节
+local function tpSanitize(mdl)
+	local function inside(p)
+		return p ~= nil and p:IsDescendantOf(mdl)
+	end
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("BasePart") and (d.Name == "Camera" or d.Name == "CameraPart"
+			or d.Name == "Left Arm" or d.Name == "Right Arm" or d.Name == "Glove") then
+			pcall(function() d:Destroy() end)
+		elseif d:IsA("LuaSourceContainer") or d:IsA("Camera") or d:IsA("Light") then
+			pcall(function() d:Destroy() end)
+		end
+	end
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("JointInstance") or d:IsA("WeldConstraint") or d:IsA("Snap") then
+			if not (inside(d.Part0) and inside(d.Part1)) then
+				pcall(function() d:Destroy() end)
+			end
+		end
+	end
+	return tpCount(mdl) > 0
+end
+
+-- 造模型：工厂优先（NoFactory 时跳过），克隆兜底（ForceFactory 时跳过）
+local function tpBuildModel(name)
+	if not TPW.NoFactory then
+		local lib = tpSkinsLib()
+		if lib then
+			local cfg = getgenv().SkinConfig
+			local skin = (type(cfg) == "table" and type(cfg.GunSkins) == "table")
+				and cfg.GunSkins[name] or nil
+			local cands = {}
+			if type(skin) == "string" and skin ~= "" then
+				cands[#cands + 1] = skin
+			end
+			cands[#cands + 1] = "Stock"
+			cands[#cands + 1] = "Vanilla"
+			cands[#cands + 1] = ""
+			for _, s in ipairs(cands) do
+				local ok, m = pcall(lib.GetCharacterModel, name, s)
+				if ok and typeof(m) == "Instance" and m:IsA("Model") then
+					if tpSanitize(m) then
+						tpSrcTag = "工厂(" .. tostring(s == "" and "无皮肤" or s) .. ")"
+						return m
+					end
+					pcall(function() m:Destroy() end)
+				end
+			end
+			tpErr = "工厂无可用模型"
+		else
+			tpErr = "工厂不可用"
+		end
+	end
+	if not TPW.ForceFactory then
+		local cam = workspace.CurrentCamera
+		if cam then
+			for _, mdl in ipairs(cam:GetChildren()) do
+				if mdl:IsA("Model") and mdl.Name == name then
+					local w = mdl:FindFirstChild("Weapon")
+					if w and tpCount(w) > 0 then
+						local ok, c = pcall(function()
+							return w:Clone()
+						end)
+						if ok and c then
+							pcall(function() c:ScaleTo(TPW.Scale) end)
+							if tpSanitize(c) then
+								tpSrcTag = "第一人称克隆 x" .. tostring(TPW.Scale)
+								return c
+							end
+							pcall(function() c:Destroy() end)
+						end
+					end
+				end
+			end
+		end
+		tpErr = (tpErr and (tpErr .. " / ") or "") .. "克隆失败"
+	end
+	return nil
+end
+
+-- 抄远程玩家的焊点：要求零件名集合与我们的模型一致
+local function tpFindNative(key)
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LP then
+			local char = plr.Character
+			local hand = char and (char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm"))
+			if hand and hand:IsA("BasePart") then
+				for _, j in ipairs(hand:GetChildren()) do
+					if j:IsA("JointInstance") then
+						local a, b = j.Part0, j.Part1
+						local other = (a == hand) and b or a
+						local mdl = other and other.Parent
+						if mdl and mdl:IsA("Model") and tpKey(mdl) == key then
+							return {
+								C0 = j.C0, C1 = j.C1,
+								handIsPart0 = (a == hand),
+								otherName = other.Name,
+								from = plr.Name,
+							}
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function tpHasJoint(p)
+	for _, j in ipairs(p:GetChildren()) do
+		if j:IsA("JointInstance") or j:IsA("WeldConstraint") then
+			return true
+		end
+	end
+	return false
+end
+
+-- 整块移动模型（避免焊接前的一帧闪现在原点）
+local function tpMove(mdl, main, target)
+	local delta = target * main.CFrame:Inverse()
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("BasePart") then
+			pcall(function() d.CFrame = delta * d.CFrame end)
+		end
+	end
+	pcall(function() main.CFrame = target end)
+end
+
+local function tpAttach(mdl, char, native)
+	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+	if not (hand and hand:IsA("BasePart")) then
+		tpErr = "找不到右手"
+		return nil
+	end
+	local main
+	if native then
+		main = mdl:FindFirstChild(native.otherName)
+	end
+	if not (main and main:IsA("BasePart")) then
+		main = mdl.PrimaryPart or mdl:FindFirstChild("Handle") or mdl:FindFirstChildWhichIsA("BasePart")
+	end
+	if not (main and main:IsA("BasePart")) then
+		tpErr = "模型没有可用部件"
+		return nil
+	end
+	mdl.PrimaryPart = main
+
+	-- 放进 workspace.Debris.<你>_Weapon（与游戏一致，也让"角色外观"不去染枪）
+	local holder = workspace:FindFirstChild("Debris")
+	if not (holder and holder:IsA("Instance")) then
+		holder = workspace
+	end
+	local box = holder:FindFirstChild(LP.Name .. "_Weapon")
+	if not box then
+		box = Instance.new("Model")
+		box.Name = LP.Name .. "_Weapon"
+		box.Parent = holder
+	end
+	mdl.Name = "Weapon"
+	mdl.Parent = box
+
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("BasePart") then
+			pcall(function()
+				d.Anchored = false
+				d.CanCollide = false
+				d.CanQuery = false
+				d.CanTouch = false
+				d.Massless = true
+			end)
+		end
+	end
+	-- 内部未焊的零件：按当前相对位置补焊到主部件
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("BasePart") and d ~= main and not tpHasJoint(d) then
+			local w = Instance.new("Weld")
+			w.Name = "TP_AutoWeld"
+			w.Part0 = main
+			w.Part1 = d
+			w.C0 = main.CFrame:Inverse() * d.CFrame
+			w.C1 = CFrame.new()
+			w.Parent = main
+		end
+	end
+
+	local weld = Instance.new("Weld")
+	weld.Name = "TP_HandWeld"
+	if native then
+		-- 照抄游戏的 C0/C1 与 Part0/Part1 角色
+		if native.handIsPart0 then
+			weld.Part0, weld.Part1 = hand, main
+			tpMove(mdl, main, hand.CFrame * native.C0 * native.C1:Inverse())
+		else
+			weld.Part0, weld.Part1 = main, hand
+			tpMove(mdl, main, hand.CFrame * native.C1 * native.C0:Inverse())
+		end
+		weld.C0, weld.C1 = native.C0, native.C1
+	else
+		weld.Part0, weld.Part1 = hand, main
+		weld.C0, weld.C1 = tpOffset(), CFrame.new()
+		tpMove(mdl, main, hand.CFrame * weld.C0)
+	end
+	weld.Parent = hand
+	return weld
+end
+
+-- 驱动：0.1 秒检查；偏移实时生效；每 4 秒重建一次以跟随外观/皮肤颜色
+task.spawn(function()
+	while task.wait(0.1) do
+		if Library.Unloaded then
+			tpClear()
+			return
+		end
+		local camState = getgenv().CameraState
+		local wantOn = TPW.On and type(camState) == "table" and camState.TP == true
+			and not isSpectating()
+		if not wantOn then
+			if tpModel then
+				tpClear()
+			end
+		else
+			local char = LP.Character
+			local name = tpWeaponName()
+			if not (char and char.Parent and name) then
+				if tpModel then
+					tpClear()
+				end
+			else
+				local now = os.clock()
+				local stale = (tpModel == nil) or (tpModel.Parent == nil)
+					or (tpName ~= name) or (now - tpBuilt > 4)
+				if stale then
+					tpClear()
+					local mdl = tpBuildModel(name)
+					if mdl then
+						local native
+						if TPW.UseNative then
+							native = tpFindNative(tpKey(mdl))
+						end
+						local ok, w = pcall(tpAttach, mdl, char, native)
+						if ok and w then
+							tpModel, tpWeld, tpName, tpBuilt = mdl, w, name, now
+							tpErr = nil
+							if native then
+								tpSrcTag = (tpSrcTag or "") .. " + 抄自 " .. native.from
+							else
+								tpSrcTag = (tpSrcTag or "") .. " + 滑块兜底"
+							end
+						else
+							pcall(function() mdl:Destroy() end)
+						end
+					end
+				elseif tpWeld and tpWeld.Parent then
+					if not TPW.UseNative then
+						pcall(function()
+							tpWeld.C0 = tpOffset()
+						end)
+					end
+				end
+			end
+		end
+	end
+end)
+
+getgenv().TPWeaponCleanup = function()
+	TPW.On = false
+	tpClear()
+end
+
+getgenv().TPWeaponStatus = function()
+	local camState = getgenv().CameraState
+	print(("[手持模型] 开关=%s 第三人称=%s 观战=%s 武器=%s"):format(
+		tostring(TPW.On), tostring(camState and camState.TP),
+		tostring(isSpectating()), tostring(tpName)))
+	print(("[手持模型] 来源=%s | 失败原因=%s"):format(tostring(tpSrcTag), tostring(tpErr)))
+	if tpModel then
+		local main = tpModel.PrimaryPart
+		print(("[手持模型] 模型=%s 部件=%d 主部件=%s"):format(
+			tpModel.Name, tpCount(tpModel), main and main.Name or "nil"))
+		if tpWeld then
+			print(("[手持模型] 焊缝 Part0=%s Part1=%s | C0=%s"):format(
+				tpWeld.Part0 and tpWeld.Part0.Name or "?",
+				tpWeld.Part1 and tpWeld.Part1.Name or "?", tostring(tpWeld.C0)))
+		end
+		if main then
+			local cam = workspace.CurrentCamera
+			local sp, onScreen = cam:WorldToViewportPoint(main.Position)
+			print(("[手持模型] 屏幕=(%.0f,%.0f) 可见=%s 距相机=%.1f"):format(
+				sp.X, sp.Y, tostring(onScreen), (cam.CFrame.Position - main.Position).Magnitude))
+		end
+	end
+end
+
+--== 玩家页：第三人称手持模型 ==
+local TPBox = Tabs.Player:AddLeftGroupbox("第三人称手持模型")
+
+TPBox:AddToggle("TPW_On", {
+	Text = "显示手持模型（第三人称）",
+	Default = TPW.On,
+	Tooltip = "把武器模型焊到角色右手；仅在「启用第三人称」开启时生效（仅本机可见）",
+	Callback = function(v)
+		TPW.On = v
+		if not v then
+			tpClear()
+		else
+			tpBuilt = 0
+			task.delay(0.6, function()
+				if TPW.On then
+					getgenv().TPWeaponStatus()
+				end
+			end)
+		end
+	end,
+})
+
+TPBox:AddToggle("TPW_Native", {
+	Text = "使用游戏原生偏移（推荐）",
+	Default = TPW.UseNative,
+	Tooltip = "扫场上拿着同款枪的玩家，抄它的焊点数值 → 和敌人手里的枪完全一致。关掉则用下面的滑块手调",
+	Callback = function(v)
+		TPW.UseNative = v
+		tpBuilt = 0
+	end,
+})
+
+TPBox:AddDropdown("TPW_Src", {
+	Text = "模型来源",
+	Values = { "自动（工厂优先）", "仅工厂", "仅第一人称克隆" },
+	Default = "自动（工厂优先）",
+	Searchable = false,
+	Callback = function(v)
+		if v == "仅工厂" then
+			TPW.ForceFactory = true
+			TPW.NoFactory = false
+		elseif v == "仅第一人称克隆" then
+			TPW.NoFactory = true
+			TPW.ForceFactory = false
+		else
+			TPW.ForceFactory = false
+			TPW.NoFactory = false
+		end
+		tpBuilt = 0
+	end,
+})
+
+TPBox:AddSlider("TPW_Scale", {
+	Text = "克隆缩放（仅克隆兜底时用）",
+	Default = TPW.Scale, Min = 1, Max = 30, Rounding = 1,
+	Callback = function(v)
+		TPW.Scale = v
+		tpBuilt = 0
+	end,
+})
+
+TPBox:AddDivider()
+
+TPBox:AddSlider("TPW_PosX", {
+	Text = "位置 X（仅滑块兜底）", Default = TPW.PosX, Min = -3, Max = 3, Rounding = 2,
+	Callback = function(v) TPW.PosX = v end,
+})
+TPBox:AddSlider("TPW_PosY", {
+	Text = "位置 Y（仅滑块兜底）", Default = TPW.PosY, Min = -3, Max = 3, Rounding = 2,
+	Callback = function(v) TPW.PosY = v end,
+})
+TPBox:AddSlider("TPW_PosZ", {
+	Text = "位置 Z（仅滑块兜底）", Default = TPW.PosZ, Min = -3, Max = 3, Rounding = 2,
+	Callback = function(v) TPW.PosZ = v end,
+})
+TPBox:AddSlider("TPW_RotX", {
+	Text = "旋转 X（仅滑块兜底）", Default = TPW.RotX, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Callback = function(v) TPW.RotX = v end,
+})
+TPBox:AddSlider("TPW_RotY", {
+	Text = "旋转 Y（仅滑块兜底）", Default = TPW.RotY, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Callback = function(v) TPW.RotY = v end,
+})
+TPBox:AddSlider("TPW_RotZ", {
+	Text = "旋转 Z（仅滑块兜底）", Default = TPW.RotZ, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Callback = function(v) TPW.RotZ = v end,
+})
+
+TPBox:AddDivider()
+
+TPBox:AddButton({
+	Text = "刷新模型",
+	Tooltip = "立即重建（换枪、改外观后想立刻看到效果时用）",
+	Func = function()
+		tpBuilt = 0
+	end,
+})
+
+TPBox:AddButton({
+	Text = "打印状态（控制台）",
+	Tooltip = "输出开关 / 武器 / 模型来源 / 失败原因 / 屏幕位置，排查用",
+	Func = function()
+		getgenv().TPWeaponStatus()
+	end,
+})
+
+end -- ★ 节 6.11 结束
+
+--// ======================== 6.12 世界 · 天空盒（本机） ========================
+-- 探测结论：游戏用的是标准 Sky 实例，名为 "Realistic Clouds"
+--   SkyboxBk/Dn/Ft/Lf/Rt/Up + SunTextureId / MoonTextureId / StarCount /
+--   SunAngularSize / MoonAngularSize / CelestialBodiesShown
+-- 换天空盒 = 直接改这 6 张贴图 + 日月参数，无需自建穹顶
+-- 原始值快照在 getgenv().SkyOrig，重贴会先还原；我们自己新建的 Sky 会销毁，游戏原有的只还原数值
+do
+
+local Lighting = game:GetService("Lighting")
+local SKY_FACES = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp" }
+
+local SK = getgenv().SkyState
+if type(SK) ~= "table" then
+	SK = {}
+	getgenv().SkyState = SK
+end
+for k, v in pairs({
+	On = false,
+	StarCount = 3000,
+	Celestial = true,
+	SunOn = false, SunId = "", SunSize = 6,
+	MoonOn = false, MoonId = "", MoonSize = 2,
+}) do
+	if SK[k] == nil then
+		SK[k] = v
+	end
+end
+for _, f in ipairs(SKY_FACES) do
+	if SK[f] == nil then
+		SK[f] = ""
+	end
+end
+
+-- ---------- 原始值：只快照一次；重贴先还原 ----------
+local SkyOrig = getgenv().SkyOrig
+if type(SkyOrig) ~= "table" then
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	SkyOrig = { Existed = s ~= nil, Created = false, Faces = {} }
+	for _, f in ipairs(SKY_FACES) do
+		SkyOrig.Faces[f] = s and s[f] or ""
+	end
+	SkyOrig.StarCount = s and s.StarCount or 3000
+	SkyOrig.CelestialBodiesShown = s and s.CelestialBodiesShown or true
+	SkyOrig.SunTextureId = s and s.SunTextureId or ""
+	SkyOrig.MoonTextureId = s and s.MoonTextureId or ""
+	SkyOrig.SunAngularSize = s and s.SunAngularSize or 0
+	SkyOrig.MoonAngularSize = s and s.MoonAngularSize or 0
+	getgenv().SkyOrig = SkyOrig
+end
+
+local function skyRestoreOrig()
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	if s then
+		for _, f in ipairs(SKY_FACES) do
+			if SkyOrig.Faces[f] ~= "" then
+				pcall(function() s[f] = SkyOrig.Faces[f] end)
+			end
+		end
+		pcall(function()
+			s.StarCount = SkyOrig.StarCount
+			s.CelestialBodiesShown = SkyOrig.CelestialBodiesShown
+			s.SunTextureId = SkyOrig.SunTextureId
+			s.MoonTextureId = SkyOrig.MoonTextureId
+			s.SunAngularSize = SkyOrig.SunAngularSize
+			s.MoonAngularSize = SkyOrig.MoonAngularSize
+		end)
+	end
+	if SkyOrig.Created and not SkyOrig.Existed then
+		local x = Lighting:FindFirstChildOfClass("Sky")
+		if x then
+			pcall(function() x:Destroy() end)
+		end
+		SkyOrig.Created = false
+	end
+end
+
+skyRestoreOrig()
+
+SK.On, SK.SunOn, SK.MoonOn = false, false, false
+
+local function skyGet(create)
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	if s then
+		return s
+	end
+	if not create then
+		return nil
+	end
+	local ok, ns = pcall(function()
+		local n = Instance.new("Sky")
+		n.Name = "BeautifySky"
+		n.Parent = Lighting
+		return n
+	end)
+	if ok and ns then
+		SkyOrig.Created = true
+		return ns
+	end
+	return nil
+end
+
+local function skyAnyOn()
+	return SK.On or SK.SunOn or SK.MoonOn
+end
+
+local function skyApply()
+	pcall(function()
+		skyRestoreOrig()
+		if not skyAnyOn() then
+			return
+		end
+		local s = skyGet(true)
+		if not s then
+			return
+		end
+		if SK.On then
+			for _, f in ipairs(SKY_FACES) do
+				local id = SK[f]
+				if type(id) == "string" and id ~= "" then
+					s[f] = id
+				end
+			end
+			s.StarCount = math.floor(math.clamp(SK.StarCount, 0, 20000))
+		end
+		s.CelestialBodiesShown = SK.Celestial
+		if SK.SunOn then
+			if SK.SunId ~= "" then
+				s.SunTextureId = SK.SunId
+			end
+			s.SunAngularSize = SK.SunSize
+		end
+		if SK.MoonOn then
+			if SK.MoonId ~= "" then
+				s.MoonTextureId = SK.MoonId
+			end
+			s.MoonAngularSize = SK.MoonSize
+		end
+	end)
+end
+
+getgenv().SkyCleanup = function()
+	SK.On, SK.SunOn, SK.MoonOn = false, false, false
+	skyRestoreOrig()
+end
+
+getgenv().SkyReport = function()
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	if not s then
+		print("[天空盒] 当前没有 Sky 实例")
+		return
+	end
+	print(("[天空盒] %s | StarCount=%d Celestial=%s Sun=%.1f Moon=%.1f"):format(
+		s.Name, s.StarCount, tostring(s.CelestialBodiesShown), s.SunAngularSize, s.MoonAngularSize))
+	print(("[天空盒] Bk=%s Dn=%s Ft=%s Lf=%s Rt=%s Up=%s"):format(
+		s.SkyboxBk, s.SkyboxDn, s.SkyboxFt, s.SkyboxLf, s.SkyboxRt, s.SkyboxUp))
+	print(("[天空盒] Sun=%s Moon=%s | 原始: Bk=%s StarCount=%d"):format(
+		s.SunTextureId, s.MoonTextureId, SkyOrig.Faces.SkyboxBk, SkyOrig.StarCount))
+end
+
+getgenv().SkyProbe = function()
+	local out = {}
+	local function P(s)
+		out[#out + 1] = s
+	end
+	P("=== Lighting 子实例 ===")
+	for _, c in ipairs(Lighting:GetChildren()) do
+		P(("  %s [%s]"):format(c.Name, c.ClassName))
+	end
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	if s then
+		P("=== 当前 Sky ===")
+		for _, f in ipairs(SKY_FACES) do
+			P(("  %s = %s"):format(f, s[f]))
+		end
+		P(("  Sun=%s Moon=%s StarCount=%d SunAngular=%s MoonAngular=%s"):format(
+			s.SunTextureId, s.MoonTextureId, s.StarCount,
+			tostring(s.SunAngularSize), tostring(s.MoonAngularSize)))
+	end
+	P("=== RS.Assets.Lighting（游戏自带光照 / 天空资源）===")
+	local assets = RS:FindFirstChild("Assets")
+	local ln = assets and assets:FindFirstChild("Lighting")
+	if not ln then
+		P("  （没有 Assets.Lighting）")
+	else
+		local function rec(inst, d)
+			if d > 3 then
+				return
+			end
+			local ind = string.rep("  ", d)
+			local extra = ""
+			for _, pn in ipairs({ "Texture", "TextureId", "Image", "SkyboxBk", "SkyboxUp" }) do
+				local ok, v = pcall(function()
+					return inst[pn]
+				end)
+				if ok and type(v) == "string" and v ~= "" then
+					extra = "  " .. pn .. "=" .. v
+					break
+				end
+			end
+			P(("%s%s [%s]%s"):format(ind, inst.Name, inst.ClassName, extra))
+			for _, c in ipairs(inst:GetChildren()) do
+				rec(c, d + 1)
+			end
+		end
+		for _, c in ipairs(ln:GetChildren()) do
+			rec(c, 0)
+		end
+	end
+	local text = table.concat(out, "\n")
+	print(text)
+	if type(setclipboard) == "function" then
+		pcall(setclipboard, text)
+		print("[天空盒] 已复制到剪贴板")
+	end
+end
+
+--== 世界页：天空盒（右栏）==
+local SkyBox = Tabs.World:AddRightGroupbox("天空盒")
+
+SkyBox:AddToggle("SK_On", {
+	Text = "启用自定义天空盒",
+	Default = false,
+	Tooltip = "替换 6 面贴图与星星数量；关闭即还原成游戏原版",
+	Callback = function(v)
+		SK.On = v
+		task.defer(skyApply)
+	end,
+})
+
+for _, f in ipairs(SKY_FACES) do
+	local label = ({ SkyboxBk = "后 Bk", SkyboxDn = "下 Dn", SkyboxFt = "前 Ft",
+		SkyboxLf = "左 Lf", SkyboxRt = "右 Rt", SkyboxUp = "上 Up" })[f]
+	SkyBox:AddInput("SK_" .. f, {
+		Text = "天空贴图 · " .. label,
+		Default = "",
+		Placeholder = "rbxassetid:// 或留空 = 不改",
+		Finished = true,
+		Tooltip = "留空则保留原贴图",
+		Callback = function(v)
+			SK[f] = (type(v) == "string") and v or ""
+			if SK.On then
+				task.defer(skyApply)
+			end
+		end,
+	})
+end
+
+SkyBox:AddSlider("SK_Star", {
+	Text = "星星数量",
+	Default = SK.StarCount, Min = 0, Max = 20000, Rounding = 0,
+	Tooltip = "0 = 没有星星",
+	Callback = function(v)
+		SK.StarCount = v
+		if SK.On then
+			task.defer(skyApply)
+		end
+	end,
+})
+
+SkyBox:AddToggle("SK_Celestial", {
+	Text = "显示天体（太阳 / 月亮）",
+	Default = SK.Celestial,
+	Callback = function(v)
+		SK.Celestial = v
+		if skyAnyOn() then
+			task.defer(skyApply)
+		end
+	end,
+})
+
+SkyBox:AddDivider()
+
+SkyBox:AddToggle("SK_SunOn", {
+	Text = "自定义太阳",
+	Default = false,
+	Callback = function(v)
+		SK.SunOn = v
+		task.defer(skyApply)
+	end,
+})
+SkyBox:AddInput("SK_SunId", {
+	Text = "太阳贴图",
+	Default = "",
+	Placeholder = "留空 = 用原贴图",
+	Finished = true,
+	Callback = function(v)
+		SK.SunId = (type(v) == "string") and v or ""
+		if SK.SunOn then
+			task.defer(skyApply)
+		end
+	end,
+})
+SkyBox:AddSlider("SK_SunSize", {
+	Text = "太阳大小",
+	Default = SK.SunSize, Min = 0, Max = 30, Rounding = 1,
+	Callback = function(v)
+		SK.SunSize = v
+		if SK.SunOn then
+			task.defer(skyApply)
+		end
+	end,
+})
+
+SkyBox:AddToggle("SK_MoonOn", {
+	Text = "自定义月亮",
+	Default = false,
+	Callback = function(v)
+		SK.MoonOn = v
+		task.defer(skyApply)
+	end,
+})
+SkyBox:AddInput("SK_MoonId", {
+	Text = "月亮贴图",
+	Default = "",
+	Placeholder = "留空 = 用原贴图",
+	Finished = true,
+	Callback = function(v)
+		SK.MoonId = (type(v) == "string") and v or ""
+		if SK.MoonOn then
+			task.defer(skyApply)
+		end
+	end,
+})
+SkyBox:AddSlider("SK_MoonSize", {
+	Text = "月亮大小",
+	Default = SK.MoonSize, Min = 0, Max = 30, Rounding = 1,
+	Callback = function(v)
+		SK.MoonSize = v
+		if SK.MoonOn then
+			task.defer(skyApply)
+		end
+	end,
+})
+
+SkyBox:AddDivider()
+
+SkyBox:AddButton({
+	Text = "探测天空资源（控制台 / 剪贴板）",
+	Tooltip = "列出 Lighting 与 RS.Assets.Lighting，方便挑贴图 ID",
+	Func = function()
+		getgenv().SkyProbe()
+	end,
+})
+
+SkyBox:AddButton({
+	Text = "打印当前天空状态",
+	Tooltip = "输出 6 面贴图与日月参数",
+	Func = function()
+		getgenv().SkyReport()
+	end,
+})
+
+SkyBox:AddButton({
+	Text = "还原天空盒",
+	Tooltip = "立即恢复游戏原版天空",
+	Func = function()
+		Toggles.SK_On:SetValue(false)
+		Toggles.SK_SunOn:SetValue(false)
+		Toggles.SK_MoonOn:SetValue(false)
+		getgenv().SkyCleanup()
+	end,
+})
+
+end -- ★ 节 6.12 结束
+
+--// ======================== 7. 导航与渲染 ========================
+local function isEntryActive(entry)
+	local cfg = getgenv().SkinConfig
+	if not entry or type(cfg) ~= "table" then return false end
+	if entry.kind == "knife" then
+		return cfg.DK == entry.knife and (cfg.DS or "") == (entry.skin or "")
+	elseif entry.kind == "gun" then
+		return (cfg.GunSkins or {})[entry.weapon] == entry.skin
+	elseif entry.kind == "glove" then
+		return cfg.GG == entry.gloveType and (cfg.GS or "") == (entry.skin or "")
+	end
+	return false
+end
+
+local function makeCard(cardDef, order)
+	local entry = cardDef.entry
+	local isMenu = cardDef.type == "menu"
+	local isDefault = cardDef.isDefault or (entry and entry.isDefault) or false
+	local useViewport = cardDef.usesViewport or (entry and entry.usesViewport) or false
+	local active = (not isMenu) and isEntryActive(entry) or false
+
+	local btn = Library:Create("TextButton", {
+		AutoButtonColor = false,
+		Text = "",
+		BackgroundColor3 = Library.MainColor,
+		BorderColor3 = active and Library.AccentColor or Color3.new(0, 0, 0),
+		BorderSizePixel = 1,
+		LayoutOrder = order,
+		ZIndex = 5,
+		Parent = skinGrid.holder,
+	})
+	Library:AddToRegistry(btn, {
+		BackgroundColor3 = "MainColor",
+		BorderColor3 = active and "AccentColor" or "Black",
+	})
+
+	local function setBorder(colorKey, colorValue)
+		btn.BorderColor3 = colorValue
+		local reg = Library.RegistryMap[btn]
+		if reg then reg.Properties.BorderColor3 = colorKey end
+	end
+
+	btn.MouseEnter:Connect(function() setBorder("AccentColor", Library.AccentColor) end)
+	btn.MouseLeave:Connect(function()
+		if active then
+			setBorder("AccentColor", Library.AccentColor)
+		else
+			setBorder("Black", Color3.new(0, 0, 0))
+		end
+	end)
+
+	local imgId = cardDef.image
+	if (type(imgId) ~= "string" or imgId == "") and entry and type(entry.id) == "string" and entry.id ~= "" then
+		imgId = entry.id
+	end
+	if (type(imgId) ~= "string" or imgId == "") and useViewport then
+		imgId = KNIFE_GROUP_ICON
+	end
+
+	local contentShown = false
+	if useViewport then
+		contentShown = createSaberViewport(btn, UDim2.fromOffset(3, 3), UDim2.new(1, -6, 1, -19)) ~= nil
+	end
+	if not contentShown and type(imgId) == "string" and imgId ~= "" then
+		local img = Library:Create("ImageLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(3, 3),
+			Size = UDim2.new(1, -6, 1, -19),
+			ScaleType = Enum.ScaleType.Fit,
+			Image = imgId,
+			ZIndex = 6,
+			Parent = btn,
+		})
+		registerImage(img, imgId)
+		contentShown = true
+	end
+	if not contentShown and isDefault then
+		local t = Library:Create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(3, 3),
+			Size = UDim2.new(1, -6, 1, -19),
+			Font = Library.Font,
+			TextSize = 15,
+			Text = "默认",
+			TextColor3 = Color3.new(1, 1, 1),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			ZIndex = 6,
+			Parent = btn,
+		})
+		Library:AddToRegistry(t, { TextColor3 = "FontColor" })
+		pcall(function() Library:ApplyTextStroke(t) end)
+	end
+
+	local nameLabel = Library:Create("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 2, 1, -14),
+		Size = UDim2.new(1, -4, 0, 12),
+		Font = Library.Font,
+		TextSize = 10,
+		Text = cardDef.label or "",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 6,
+		Parent = btn,
+	})
+	Library:AddToRegistry(nameLabel, { TextColor3 = "FontColor" })
+	pcall(function() Library:ApplyTextStroke(nameLabel) end)
+
+	if isMenu then
+		Library:Create("TextLabel", {
+			BackgroundTransparency = 1,
+			Position = UDim2.new(1, -14, 0, 0),
+			Size = UDim2.fromOffset(12, 12),
+			Font = Library.Font,
+			TextSize = 14,
+			Text = "›",
+			TextColor3 = Color3.new(1, 1, 1),
+			ZIndex = 6,
+			Parent = btn,
+		})
+	end
+
+	btn.MouseButton1Click:Connect(function()
+		if isMenu then
+			cardDef.open()
+		else
+			applySkin(entry)
+		end
+	end)
+end
+
+local function cardsRoot()
+	local cards = {
+		{ type = "menu", label = "刀具", image = "rbxassetid://96868141739315", open = function()
+			table.insert(ViewStack, { title = "刀具", render = function()
+				local list = {}
+				for _, knife in ipairs(KNIVES) do
+					local isSaber = (knife.name == "LightSaber")
+					table.insert(list, {
+						type = "menu", label = knife.name,
+						image = isSaber and KNIFE_GROUP_ICON or knife.icon,
+						usesViewport = isSaber,
+						open = function()
+							table.insert(ViewStack, { title = knife.name, render = function()
+								local skinCards = {}
+								for _, e in ipairs(Catalog.KnifeEntries[knife.name] or {}) do
+									table.insert(skinCards, { type = "apply", image = e.id, label = e.name, entry = e })
+								end
+								return skinCards
+							end })
+							renderGrid()
+						end,
+					})
+				end
+				return list
+			end })
+			renderGrid()
+		end },
+		{ type = "menu", label = "手套", image = GLOVE_ICON, open = function()
+			table.insert(ViewStack, { title = "手套", render = function()
+				local list = {}
+				for _, gtype in ipairs(GloveTypeOrder) do
+					local entries = Catalog.GloveTypeEntries[gtype] or {}
+					local icon = GLOVE_ICON
+					if entries[1] and entries[1].id then icon = entries[1].id end
+					table.insert(list, {
+						type = "menu", label = gtype, image = icon,
+						open = function()
+							table.insert(ViewStack, { title = gtype, render = function()
+								local skinCards = {}
+								for _, e in ipairs(Catalog.GloveTypeEntries[gtype] or {}) do
+									table.insert(skinCards, { type = "apply", image = e.id, label = e.name, entry = e })
+								end
+								return skinCards
+							end })
+							renderGrid()
+						end,
+					})
+				end
+				return list
+			end })
+			renderGrid()
+		end },
+	}
+	for _, cat in ipairs(CATEGORIES) do
+		table.insert(cards, {
+			type = "menu", label = cat.label, image = cat.icon,
+			open = function()
+				table.insert(ViewStack, { title = cat.label, render = function()
+					local list = {}
+					for _, e in ipairs(Catalog.GunEntries[cat.id] or {}) do
+						table.insert(list, { type = "apply", image = e.id, label = e.name, entry = e })
+					end
+					return list
+				end })
+				renderGrid()
+			end,
+		})
+	end
+	return cards
+end
+ViewStack[1].render = cardsRoot
+
+renderGrid = function()
+	skinGrid.clear()
+	local top = ViewStack[#ViewStack]
+	local cards = top.render()
+	for i, cardDef in ipairs(cards) do
+		makeCard(cardDef, i)
+	end
+	skinGrid.sync()
+
+	local crumbs = {}
+	for _, view in ipairs(ViewStack) do
+		table.insert(crumbs, view.title)
+	end
+	pcall(function() backButton:SetDisabled(#ViewStack <= 1) end)
+	breadcrumbLabel:SetText("位置：" .. table.concat(crumbs, " › "))
+	warmImages()
+end
+
+applySkin = function(entry)
+	local cfg = getgenv().SkinConfig
+	local changed = false
+	local isGunDefault = false
+	if entry.kind == "knife" then
+		cfg.DK, cfg.DS, cfg.DW = entry.knife, entry.skin or "", entry.wear or "Factory New"
+		changed = true
+	elseif entry.kind == "gun" then
+		cfg.GunSkins = cfg.GunSkins or {}
+		if entry.skin == "" then
+			cfg.GunSkins[entry.weapon] = nil
+			isGunDefault = true
+		else
+			cfg.GunSkins[entry.weapon] = entry.skin
+		end
+		cfg.GunWear = entry.wear or "Factory New"
+		changed = true
+	elseif entry.kind == "glove" then
+		cfg.GG, cfg.GS, cfg.GW = entry.gloveType, entry.skin or "", entry.wear or "Factory New"
+		changed = true
+	end
+	if not changed then return end
+	if not HooksInstalled and SkinApplier.tryInstall() then
+		Library:Notify("皮肤钩子已自动重装", 3)
+	end
+	updatePreviewBig({ icon = entry.id, label = entry.label, entry = entry, slot = makeSlot(entry), usesViewport = entry.usesViewport })
+	renderGrid()
+	refreshAppliedThumbs()
+	if entry.kind == "glove" then
+		GloveEngine.RebuildSoon()
+		Library:Notify(("已应用：%s\n手套即时生效"):format(entry.label), 4)
+	elseif isGunDefault then
+		Library:Notify(("已恢复 %s 默认外观\n切枪 / 重生后生效"):format(entry.weapon or "武器"), 4)
+	else
+		Library:Notify(("已应用：%s\n请切成其他武器再切回来（或重生）以重建模型"):format(entry.label), 5)
+	end
+end
+
+--// ======================== 8. 初始化 ========================
+reloadAttrData()
+buildCatalog()
+renderGrid()
+refreshAppliedThumbs()
+updatePreviewBig(nil)
+
+task.spawn(function()
+	for _ = 1, 15 do
+		task.wait(2)
+		if Library.Unloaded then return end
+		local cfg = getgenv().SkinConfig
+		if not (type(cfg) == "table" and type(cfg.GG) == "string" and cfg.GG ~= "") then return end
+		local ok, applied = pcall(GloveEngine.Rebuild)
+		if ok and applied then return end
+	end
+end)
+
+local gloveCharConn = LP.CharacterAdded:Connect(function()
+	task.delay(1.5, function()
+		if not Library.Unloaded then
+			pcall(GloveEngine.Rebuild)
+		end
+	end)
+end)
+
+if not AttrData then
+	task.spawn(function()
+		for _ = 1, 60 do
+			task.wait(1)
+			if Library.Unloaded then return end
+			if reloadAttrData() then
+				buildCatalog()
+				renderGrid()
+				return
+			end
+		end
+	end)
+end
+
+--// ======================== 9. 界面设置页 ========================
+local MenuGroup = Tabs.Settings:AddLeftGroupbox("菜单")
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+	Default = Library.KeybindFrame.Visible,
+	Text = "打开按键菜单",
+	Callback = function(value) Library.KeybindFrame.Visible = value end,
+})
+
+MenuGroup:AddToggle("ShowCustomCursor", {
+	Text = "自定义光标",
+	Default = true,
+	Callback = function(Value) Library.ShowCustomCursor = Value end,
+})
+
+MenuGroup:AddDivider()
+
+MenuGroup:AddLabel("菜单按键"):AddKeyPicker("MenuKeybind", {
+	Default = "RightShift",
+	NoUI = true,
+	Text = "菜单按键",
+})
+
+MenuGroup:AddButton("卸载", function() Library:Unload() end)
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+
+SaveManager.Parser.SkinBrowser = {
+	Save = function(idx, object)
+		return {
+			type = "SkinBrowser", idx = idx,
+			value = { SkinConfig = getgenv().SkinConfig },
+		}
+	end,
+	Load = function(idx, data)
+		if type(data.value) ~= "table" or type(data.value.SkinConfig) ~= "table" then return end
+		local cfg = getgenv().SkinConfig
+		cfg.DK, cfg.DS, cfg.DW = nil, "", "Factory New"
+		cfg.GG, cfg.GS, cfg.GW = nil, "", "Factory New"
+		cfg.GunSkins, cfg.GunWear = {}, "Factory New"
+		for k, v in pairs(data.value.SkinConfig) do
+			cfg[k] = v
+		end
+		if not HooksInstalled then pcall(SkinApplier.tryInstall) end
+		renderGrid()
+		refreshAppliedThumbs()
+		updatePreviewBig(nil)
+		GloveEngine.RebuildSoon()
+	end,
+}
+Options.SkinBrowserData = { Type = "SkinBrowser", Value = true }
+
+ThemeManager:SetFolder("MyScriptHub")
+SaveManager:SetFolder("MyScriptHub/BloxStrike")
+SaveManager:BuildConfigSection(Tabs.Settings)
+ThemeManager:ApplyToTab(Tabs.Settings)
+
+--// ======================== 10. 水印 ========================
+Library:SetWatermarkVisibility(true)
+
+local FrameTimer = tick()
+local FrameCounter = 0
+local FPS = 60
+local GetPing = function()
+	return math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())
+end
+local CanDoPing = pcall(function() return GetPing() end)
+
+local WatermarkConnection = RunService.RenderStepped:Connect(function()
+	FrameCounter += 1
+	if (tick() - FrameTimer) >= 1 then
+		FPS = FrameCounter
+		FrameTimer = tick()
+		FrameCounter = 0
+	end
+	if CanDoPing then
+		Library:SetWatermark(("美化菜单 | %d 帧 | %d 毫秒"):format(math.floor(FPS), GetPing()))
+	else
+		Library:SetWatermark(("美化菜单 | %d 帧"):format(math.floor(FPS)))
+	end
+end)
+
+Library:OnUnload(function()
+	WatermarkConnection:Disconnect()
+	if gloveCharConn then
+		gloveCharConn:Disconnect()
+		gloveCharConn = nil
+	end
+	pcall(function() getgenv().ViewModelCleanup() end)
+	pcall(function() getgenv().AppearanceCleanup() end)
+	pcall(function() getgenv().CameraCleanup() end)
+	pcall(function() getgenv().WorldCleanup() end)
+	pcall(function() getgenv().TPWeaponCleanup() end)
+	pcall(function() getgenv().SkyCleanup() end) -- ★ v22 新增：还原天空盒
+end)
+
+print("[美化菜单 v22] 初始化完成")
+pcall(function() Library:Notify("美化菜单已加载", 3) end)
