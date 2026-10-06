@@ -1,17 +1,8 @@
 --[[ ========================================================================
- 美化菜单 v22 · 皮肤浏览器 + 视角模型 + 透明外观替换 + 摄像机 + 世界滤镜 + 天空盒 + 第三人称手持
- 页面：标签「美化」→ 皮肤库 / 已选预览 / 删除 / 自定义视角模型 / 透明外观替换
-       标签「玩家」→ 摄像机功能 + 第三人称手持模型
-       标签「世界」→ 世界滤镜 + 天空盒
-       标签「界面设置」→ 菜单 + 主题 + 配置（手动保存/加载皮肤数据）
- v22 新增 / 改动：
-   - 观战状态机：进入观战 → 硬还原 + 停写 + 恢复 Highlight；退出自动恢复
-   - 6.11 整段重写：工厂 GetCharacterModel(name,"Stock") → 抄远程玩家焊点 → 滑块兜底
-   - 6.12 天空盒：6 面贴图 + 日月贴图 + 星星数 + 天体开关 + 探测 + 还原
-   - 顶部补 isSpectating()（供 6.8 / 6.9 / 6.11 共用）
- v21 保留：C4 外观不再碰 C4 自带手臂/手套；第三人称手持模型
- v20 保留：世界滤镜（Lighting + Atmosphere）
- v19 保留：分节 do ... end 修复 200 局部变量上限
+ 美化菜单 v23 · 皮肤浏览器 + 视角模型 + 透明外观替换 + 摄像机 + 世界滤镜 + 天空盒预设 + 第三人称手持
+ v23 改动：
+   - 6.11 整段重写：抄游戏焊点（尺寸相似度认枪 + 锚点同名 + Handle 换算）+ 自动对齐兜底
+   - 6.12 整段重写：天空盒改成「预设下拉」，实时读 RS.Assets.Lighting/<地图名>，可连带套用氛围/画面效果
  控制台备用：
    getgenv().SkinInstallHooks() / getgenv().SkinUninstallHooks() / getgenv().SkinDebugLog(20)
    getgenv().ViewModelCleanup()   -- 还原视角模型
@@ -20,11 +11,9 @@
    getgenv().WorldCleanup()       -- 还原世界滤镜
    getgenv().WorldReport()        -- 世界滤镜当前值 / 原始值
    getgenv().SkyCleanup()         -- 还原天空盒
-   getgenv().SkyReport()          -- 天空盒当前状态
-   getgenv().SkyProbe()           -- 列出 Lighting 与 RS.Assets.Lighting
+   getgenv().SkyReport()          -- 天空盒当前状态 / 预设列表
    getgenv().TPWeaponCleanup()    -- 清掉第三人称手持模型
-   getgenv().TPWeaponStatus()     -- 手持模型状态
-   getgenv().TPWeaponProbe()      -- 探测游戏原生手持武器偏移
+   getgenv().TPWeaponStatus()     -- 手持模型状态 / 相似度诊断
    getgenv().AppearanceReport()   -- 生效部件 + Highlight + C4 命中
    getgenv().C4Probe()            -- C4 路径探测
 ============================================================================ ]]
@@ -868,7 +857,6 @@ local function lazyRequireSkins()
 	return nil
 end
 
--- 手套引擎（GloveEngine 已在块外声明）
 local gloveSkinCache = {}
 
 local function getInventoryController()
@@ -1055,7 +1043,6 @@ local function migrateLegacy()
 	end
 end
 
--- SkinApplier 已在块外声明
 function SkinApplier.tryInstall()
 	if HooksInstalled then return true end
 	local lib = lazyRequireSkins()
@@ -1121,7 +1108,6 @@ end)
 end -- ★ 节 5 结束
 
 --// ======================== 5.5 观战检测（供 6.8 / 6.9 / 6.11 共用） ========================
--- ★ v22 新增：判断是否正在观战别人（相机跟随另一个玩家的角色）
 local function isSpectating()
 	local cam = workspace.CurrentCamera
 	if not cam then
@@ -2090,7 +2076,7 @@ local function appRestore(part)
 	end
 end
 
--- ★ v22 观战用：把记录全部还原并清空（清空后下次扫描会按当前状态重新快照，安全）
+-- ★ 观战用：把记录全部还原并清空（清空后下次扫描会按当前状态重新快照，安全）
 local spectateMode = false
 local function appHardReset()
 	if getgenv().AppearanceEnforce then
@@ -2357,7 +2343,6 @@ local function appApplyCharacter()
 end
 
 local function appScan()
-	-- ★ v22 观战期间不写任何外观（否则会去抢被观战者 viewmodel 的材质 → 别人切刀时闪）
 	if isSpectating() then
 		return 0
 	end
@@ -2416,7 +2401,7 @@ local function appSetEnforce(on)
 		pcall(function()
 			RunService:BindToRenderStep(ENFORCE_BIND, Enum.RenderPriority.Last.Value, function()
 				if spectateMode then
-					return -- ★ v22 观战期间不写
+					return
 				end
 				for part, d in pairs(DATA) do
 					if d.mode then
@@ -2551,7 +2536,7 @@ end
 appInstall()
 appRequestScan()
 
--- ★ v22 观战状态机：进入观战立刻硬还原并停手；退出观战重新扫描
+-- ★ 观战状态机：进入观战立刻硬还原并停手；退出观战重新扫描
 task.spawn(function()
 	while task.wait(0.1) do
 		if Library.Unloaded then
@@ -2775,7 +2760,6 @@ CAMS.fpBelow = 1.5
 CAMS.distLerp = 18
 CAMS.occludePad = 0.35
 
--- ---------- LocalTransparencyModifier ----------
 local ltmSaved, ltmWanted = {}, {}
 
 local function camSetLTM(part, v)
@@ -2823,7 +2807,6 @@ local function camRestoreLTM()
 	ltmSaved, ltmWanted = {}, {}
 end
 
--- ---------- 锚点 ----------
 local function camAnchor()
 	local char = LP.Character
 	if not (char and char.Parent) then
@@ -2840,7 +2823,6 @@ local function camAnchor()
 	return nil, nil, char
 end
 
--- ---------- 遮挡射线 ----------
 local camRay = RaycastParams.new()
 camRay.FilterType = Enum.RaycastFilterType.Exclude
 camRay.IgnoreWater = true
@@ -2854,7 +2836,6 @@ local function camRefreshFilter(cam)
 	camRay.FilterDescendantsInstances = list
 end
 
--- ---------- 零件缓存 ----------
 local camCache = { body = {}, vm = {}, vmNames = {}, t = -1 }
 
 local function camRefreshCache(cam)
@@ -2891,7 +2872,6 @@ local function camRefreshCache(cam)
 	end
 end
 
--- ---------- 正交基重建 ----------
 local function camCleanRotation(r0)
 	local rx = r0.RightVector
 	local uy = r0.UpVector
@@ -2901,7 +2881,6 @@ local function camCleanRotation(r0)
 	return CFrame.fromMatrix(Vector3.zero, rx.Unit, uy.Unit)
 end
 
--- ---------- 真·广角（FOV）----------
 local fovHookCam, fovHookConn = nil, nil
 
 local function camEnsureFovHook(cam)
@@ -2964,7 +2943,6 @@ local function camStepFOV(cam)
 	end
 end
 
--- ---------- 主循环 ----------
 local CAM_BIND = "BeautifyCameraFunction"
 pcall(function()
 	RunService:UnbindFromRenderStep(CAM_BIND)
@@ -2979,7 +2957,6 @@ local function camStep(dt)
 	if not cam then
 		return
 	end
-	-- ★ v22：观战时让行（不写相机），退出观战自动恢复
 	local wantTP = CAMS.TP and not isSpectating()
 	local wantWide = math.abs((CAMS.Wide or 1) - 1) > 0.001
 	local wantFOV = CAMS.FOV > 70.01
@@ -3539,17 +3516,21 @@ WorldBox:AddSlider("W_ClockV", {
 end -- ★ 节 6.10 结束
 
 --// ======================== 6.11 第三人称手持模型（本机） ========================
--- 探测结论（Dex/RemoteSpy 实测）：
---   * 游戏把角色武器挂在 workspace.Debris.<玩家名>_Weapon.Weapon，
---     用 Motor6D 焊到 RightHand；每把枪的 C0 都不同（不能写死）
---   * Character.WeaponModel / WeaponAttachments 永远是空的，别去那里找
---   * 工厂 Skins.GetCharacterModel(武器名, "Stock") 返回的模型，零件名与尺寸
---     与远程玩家手里的枪完全一致（"Vanilla" 返回 nil，必须用 "Stock"）
--- 本实现：
---   1) 工厂造模型（优先用你配的皮肤，其次 Stock）→ 放 workspace.Debris.<你>_Weapon
---   2) 扫远程玩家的 RightHand，找零件名集合与我们的模型一致的枪 → 抄它的 C0/C1 与 Part0/Part1 角色
---   3) 抄不到（场上没人拿同款枪）→ 用滑块兜底偏移
--- 仅本机：客户端建立的实例不会复制给其他玩家
+-- 探测结论：
+--   * 远程玩家的枪在 workspace.Debris.<玩家名>_Weapon.Weapon，用 Motor6D 焊在 RightHand 上
+--     （角色在 workspace.Characters 里，但枪**不在**角色下；workspace.Camera 只有你自己的第一人称 viewmodel）
+--   * Character.WeaponModel / WeaponAttachments 一直是空文件夹，别去那里找
+--   * 工厂 Skins.GetCharacterModel(武器名, "Stock") 得到的模型与远程玩家手里的枪同名同尺寸
+--     （"Vanilla" 返回 nil，必须用 "Stock"）
+--   * 每把枪的 C0 都不同（AWP 锚点 RootPart，USP-S 锚点 Handle），所以只能"抄"
+-- 目标：不用手调。做法：
+--   1) 工厂造同款模型
+--   2) 扫远程玩家的枪，按「同名部件的尺寸」算相似度挑同款
+--      （不比对整份零件名，避免被动态零件 MuzzlePart / Hitbox / Insert / Casing / MagBullets 干扰）
+--   3) 抄焊点：锚点按同名取；我们模型缺那个名字时，用两模型共有的 Handle 换算等价 C0
+--   4) 配方按武器名缓存，换枪回来直接复用
+--   5) 抄不到才退回「沿角色朝向自动对齐」；滑块是叠加微调，默认 0
+-- 仅本机：客户端新建的实例不会复制给其他玩家
 do
 
 local TPW = getgenv().TPWeaponState
@@ -3560,9 +3541,9 @@ end
 for k, v in pairs({
 	On = false,
 	UseNative = true,
-	Scale = 15,
 	NoFactory = false,
-	ForceFactory = false,
+	OnlyFactory = false,
+	Scale = 15,
 	PosX = 0, PosY = 0, PosZ = 0, RotX = 0, RotY = 0, RotZ = 0,
 }) do
 	if TPW[k] == nil then
@@ -3570,7 +3551,16 @@ for k, v in pairs({
 	end
 end
 
-local tpModel, tpWeld, tpName, tpBuilt, tpErr, tpSrcTag = nil, nil, nil, 0, nil, nil
+local Cache = getgenv().TPWeaponCache
+if type(Cache) ~= "table" then
+	Cache = {}
+	getgenv().TPWeaponCache = Cache
+end
+
+local HOLDER = "BeautifyTPWeapon"
+local tpModel, tpWeld, tpName, tpBuilt = nil, nil, nil, 0
+local tpErr, tpSrcTag, tpBase = nil, nil, nil
+local tpDiag = {}
 
 local function tpClear()
 	if tpWeld then
@@ -3581,14 +3571,16 @@ local function tpClear()
 		pcall(function() tpModel:Destroy() end)
 		tpModel = nil
 	end
-	local box = workspace:FindFirstChild("Debris")
-	box = box and box:FindFirstChild(LP.Name .. "_Weapon")
-	if box then
-		pcall(function() box:Destroy() end)
+	local h = workspace:FindFirstChild(HOLDER)
+	if h then
+		for _, c in ipairs(h:GetChildren()) do
+			pcall(function() c:Destroy() end)
+		end
 	end
-	tpName, tpSrcTag = nil, nil
+	tpName, tpBase = nil, nil
 end
 
+-- 滑块偏移：叠加在 base C0 之上（默认全 0 时不影响对齐）
 local function tpOffset()
 	return CFrame.new(TPW.PosX, TPW.PosY, TPW.PosZ)
 		* CFrame.Angles(math.rad(TPW.RotX), math.rad(TPW.RotY), math.rad(TPW.RotZ))
@@ -3636,22 +3628,42 @@ local function tpCount(inst)
 	return n
 end
 
--- 零件名集合指纹：用来判断「远程玩家手里的是不是同款枪」
-local function tpKey(inst)
+local function tpParts(inst)
 	local t = {}
 	if inst:IsA("BasePart") then
-		t[#t + 1] = inst.Name
+		t[inst.Name] = inst.Size
 	end
 	for _, d in ipairs(inst:GetDescendants()) do
 		if d:IsA("BasePart") then
-			t[#t + 1] = d.Name
+			t[d.Name] = d.Size
 		end
 	end
-	table.sort(t)
-	return table.concat(t, ",")
+	return t
 end
 
--- 修剪：去掉相机 / 灯光 / 手部；拆掉指向模型外部的悬空关节
+-- 相似度 = 同名部件里尺寸也一致的比例（尺寸容差 5%）
+local function tpScore(a, b)
+	local total, same = 0, 0
+	for name, sz in pairs(a) do
+		total += 1
+		local sz2 = b[name]
+		if sz2 then
+			local d = math.abs(sz.X - sz2.X) + math.abs(sz.Y - sz2.Y) + math.abs(sz.Z - sz2.Z)
+			if d < (sz.X + sz.Y + sz.Z) * 0.05 + 0.02 then
+				same += 1
+			end
+		end
+	end
+	if total == 0 then
+		return 0
+	end
+	return same / total
+end
+
+local function tpPickRef(model)
+	return model:FindFirstChild("Handle") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+end
+
 local function tpSanitize(mdl)
 	local function inside(p)
 		return p ~= nil and p:IsDescendantOf(mdl)
@@ -3674,7 +3686,7 @@ local function tpSanitize(mdl)
 	return tpCount(mdl) > 0
 end
 
--- 造模型：工厂优先（NoFactory 时跳过），克隆兜底（ForceFactory 时跳过）
+-- 造模型：工厂优先（Stock 实测可用），失败则克隆第一人称武器并放大
 local function tpBuildModel(name)
 	if not TPW.NoFactory then
 		local lib = tpSkinsLib()
@@ -3689,50 +3701,64 @@ local function tpBuildModel(name)
 			cands[#cands + 1] = "Stock"
 			cands[#cands + 1] = "Vanilla"
 			cands[#cands + 1] = ""
-			for _, s in ipairs(cands) do
-				local ok, m = pcall(lib.GetCharacterModel, name, s)
+			for _, sk in ipairs(cands) do
+				local ok, m = pcall(lib.GetCharacterModel, name, sk)
 				if ok and typeof(m) == "Instance" and m:IsA("Model") then
 					if tpSanitize(m) then
-						tpSrcTag = "工厂(" .. tostring(s == "" and "无皮肤" or s) .. ")"
+						tpSrcTag = "工厂(" .. (sk == "" and "无皮肤" or sk) .. ")"
 						return m
 					end
 					pcall(function() m:Destroy() end)
 				end
 			end
-			tpErr = "工厂无可用模型"
+			tpErr = "工厂没返回可用模型"
 		else
 			tpErr = "工厂不可用"
 		end
+		if TPW.OnlyFactory then
+			return nil
+		end
 	end
-	if not TPW.ForceFactory then
-		local cam = workspace.CurrentCamera
-		if cam then
-			for _, mdl in ipairs(cam:GetChildren()) do
-				if mdl:IsA("Model") and mdl.Name == name then
-					local w = mdl:FindFirstChild("Weapon")
-					if w and tpCount(w) > 0 then
-						local ok, c = pcall(function()
-							return w:Clone()
-						end)
-						if ok and c then
-							pcall(function() c:ScaleTo(TPW.Scale) end)
-							if tpSanitize(c) then
-								tpSrcTag = "第一人称克隆 x" .. tostring(TPW.Scale)
-								return c
-							end
-							pcall(function() c:Destroy() end)
+	local cam = workspace.CurrentCamera
+	if cam then
+		for _, mdl in ipairs(cam:GetChildren()) do
+			if mdl:IsA("Model") and mdl.Name == name then
+				local w = mdl:FindFirstChild("Weapon")
+				if w and tpCount(w) > 0 then
+					local ok, c = pcall(function()
+						return w:Clone()
+					end)
+					if ok and c then
+						pcall(function() c:ScaleTo(TPW.Scale) end)
+						if tpSanitize(c) then
+							tpSrcTag = "第一人称克隆 x" .. tostring(TPW.Scale)
+							return c
 						end
+						pcall(function() c:Destroy() end)
 					end
 				end
 			end
 		end
-		tpErr = (tpErr and (tpErr .. " / ") or "") .. "克隆失败"
+	end
+	tpErr = (tpErr and (tpErr .. " / ") or "") .. "克隆失败"
+	return nil
+end
+
+local function tpJointFor(hand, mdl)
+	for _, j in ipairs(hand:GetChildren()) do
+		if j:IsA("JointInstance") then
+			local a, b = j.Part0, j.Part1
+			if (a and a:IsDescendantOf(mdl)) or (b and b:IsDescendantOf(mdl)) then
+				return j
+			end
+		end
 	end
 	return nil
 end
 
--- 抄远程玩家的焊点：要求零件名集合与我们的模型一致
-local function tpFindNative(key)
+local function tpRemoteWeapons()
+	local out, seen = {}, {}
+	local deb = workspace:FindFirstChild("Debris")
 	for _, plr in ipairs(Players:GetPlayers()) do
 		if plr ~= LP then
 			local char = plr.Character
@@ -3743,74 +3769,149 @@ local function tpFindNative(key)
 						local a, b = j.Part0, j.Part1
 						local other = (a == hand) and b or a
 						local mdl = other and other.Parent
-						if mdl and mdl:IsA("Model") and tpKey(mdl) == key then
-							return {
-								C0 = j.C0, C1 = j.C1,
-								handIsPart0 = (a == hand),
-								otherName = other.Name,
-								from = plr.Name,
-							}
+						if mdl and mdl:IsA("Model") and not seen[mdl] then
+							seen[mdl] = true
+							out[#out + 1] = { model = mdl, hand = hand, joint = j, owner = plr.Name }
+						end
+					end
+				end
+			end
+			if deb then
+				local box = deb:FindFirstChild(plr.Name .. "_Weapon")
+				if box then
+					for _, c in ipairs(box:GetChildren()) do
+						if c:IsA("Model") and not seen[c] then
+							seen[c] = true
+							out[#out + 1] = { model = c, hand = hand, joint = nil, owner = plr.Name }
 						end
 					end
 				end
 			end
 		end
 	end
+	return out
+end
+
+-- 从一条远程武器记录提炼「焊接配方」
+local function tpMakeRecipe(cand, ourMdl)
+	local hand, mdl = cand.hand, cand.model
+	if not (hand and hand:IsA("BasePart")) then
+		return nil
+	end
+	local j = cand.joint or tpJointFor(hand, mdl)
+	if not j then
+		return nil
+	end
+	local a, b = j.Part0, j.Part1
+	local anchor = (a == hand) and b or a
+	if not (anchor and anchor:IsA("BasePart") and anchor:IsDescendantOf(mdl)) then
+		return nil
+	end
+	-- 锚点相对手的固定变换：anchor.CFrame = hand.CFrame * rel
+	local rel
+	if a == hand then
+		rel = j.C0 * j.C1:Inverse()
+	else
+		rel = j.C1 * j.C0:Inverse()
+	end
+	-- 我们模型里有同名锚点 → 直接抄
+	local ourAnchor = ourMdl:FindFirstChild(anchor.Name)
+	if ourAnchor and ourAnchor:IsA("BasePart") then
+		return { refName = ourAnchor.Name, c0 = rel }
+	end
+	-- 否则用两个模型共有的参照物换算等价 C0
+	local rn, ro = tpPickRef(mdl), tpPickRef(ourMdl)
+	if not (rn and ro and rn:IsA("BasePart") and ro:IsA("BasePart")) then
+		return nil
+	end
+	local sub = anchor.CFrame:Inverse() * rn.CFrame
+	return { refName = ro.Name, c0 = rel * sub }
+end
+
+-- 兜底：沿角色朝向对齐（枪口朝前，握在手上）
+local function tpAutoAlign(char, ourMdl)
+	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not (hand and hand:IsA("BasePart") and root and root:IsA("BasePart")) then
+		return nil
+	end
+	local ref = tpPickRef(ourMdl)
+	if not (ref and ref:IsA("BasePart")) then
+		return nil
+	end
+	local target = CFrame.new(hand.Position) * (root.CFrame - root.Position) * CFrame.new(0, 0, -0.08)
+	return { refName = ref.Name, c0 = hand.CFrame:Inverse() * target }
+end
+
+-- 抄远程玩家的焊点（带缓存）
+local function tpFindNative(name, ourMdl, ourParts)
+	local c = Cache[name]
+	if c then
+		local ref = ourMdl:FindFirstChild(c.refName)
+		if ref and ref:IsA("BasePart") and c.refSize then
+			local d = math.abs(ref.Size.X - c.refSize.X)
+				+ math.abs(ref.Size.Y - c.refSize.Y)
+				+ math.abs(ref.Size.Z - c.refSize.Z)
+			if d < 0.03 then
+				tpSrcTag = ("缓存（抄自 %s）"):format(tostring(c.from))
+				return { refName = c.refName, c0 = c.c0 }
+			end
+		end
+		Cache[name] = nil
+	end
+	local best, bestScore
+	tpDiag = {}
+	for _, cand in ipairs(tpRemoteWeapons()) do
+		local sc = tpScore(ourParts, tpParts(cand.model))
+		tpDiag[#tpDiag + 1] = ("%s/%s %d%%"):format(
+			cand.owner, cand.model.Name, math.floor(sc * 100 + 0.5))
+		if sc > (bestScore or 0) then
+			best, bestScore = cand, sc
+		end
+	end
+	if best and bestScore >= 0.5 then
+		local rec = tpMakeRecipe(best, ourMdl)
+		if rec then
+			local ref = ourMdl:FindFirstChild(rec.refName)
+			Cache[name] = {
+				refName = rec.refName, c0 = rec.c0,
+				refSize = ref and ref.Size or nil, from = best.owner,
+			}
+			tpSrcTag = ("抄自 %s（相似度 %d%%）"):format(best.owner, math.floor(bestScore * 100 + 0.5))
+			return rec
+		end
+		tpErr = "找到同款但读不到焊点"
+	else
+		tpErr = ("场上没有同款枪（最高 %d%%）"):format(math.floor((bestScore or 0) * 100 + 0.5))
+	end
 	return nil
 end
 
-local function tpHasJoint(p)
-	for _, j in ipairs(p:GetChildren()) do
-		if j:IsA("JointInstance") or j:IsA("WeldConstraint") then
-			return true
-		end
-	end
-	return false
-end
-
--- 整块移动模型（避免焊接前的一帧闪现在原点）
-local function tpMove(mdl, main, target)
-	local delta = target * main.CFrame:Inverse()
-	for _, d in ipairs(mdl:GetDescendants()) do
-		if d:IsA("BasePart") then
-			pcall(function() d.CFrame = delta * d.CFrame end)
-		end
-	end
-	pcall(function() main.CFrame = target end)
-end
-
-local function tpAttach(mdl, char, native)
+local function tpAttach(mdl, char, recipe)
 	local hand = char:FindFirstChild("RightHand") or char:FindFirstChild("Right Arm")
 	if not (hand and hand:IsA("BasePart")) then
 		tpErr = "找不到右手"
 		return nil
 	end
-	local main
-	if native then
-		main = mdl:FindFirstChild(native.otherName)
+	local ref = recipe.refName and mdl:FindFirstChild(recipe.refName)
+	if not (ref and ref:IsA("BasePart")) then
+		ref = tpPickRef(mdl)
 	end
-	if not (main and main:IsA("BasePart")) then
-		main = mdl.PrimaryPart or mdl:FindFirstChild("Handle") or mdl:FindFirstChildWhichIsA("BasePart")
-	end
-	if not (main and main:IsA("BasePart")) then
+	if not (ref and ref:IsA("BasePart")) then
 		tpErr = "模型没有可用部件"
 		return nil
 	end
-	mdl.PrimaryPart = main
+	mdl.PrimaryPart = ref
 
-	-- 放进 workspace.Debris.<你>_Weapon（与游戏一致，也让"角色外观"不去染枪）
-	local holder = workspace:FindFirstChild("Debris")
-	if not (holder and holder:IsA("Instance")) then
-		holder = workspace
-	end
-	local box = holder:FindFirstChild(LP.Name .. "_Weapon")
-	if not box then
-		box = Instance.new("Model")
-		box.Name = LP.Name .. "_Weapon"
-		box.Parent = holder
+	-- 放进我们自己的文件夹（在 workspace 里可被渲染；不在角色下，所以「角色外观」不会染它）
+	local holder = workspace:FindFirstChild(HOLDER)
+	if not holder then
+		holder = Instance.new("Folder")
+		holder.Name = HOLDER
+		holder.Parent = workspace
 	end
 	mdl.Name = "Weapon"
-	mdl.Parent = box
+	mdl.Parent = holder
 
 	for _, d in ipairs(mdl:GetDescendants()) do
 		if d:IsA("BasePart") then
@@ -3823,50 +3924,51 @@ local function tpAttach(mdl, char, native)
 			end)
 		end
 	end
-	-- 内部未焊的零件：按当前相对位置补焊到主部件
+	local function hasJoint(p)
+		for _, x in ipairs(p:GetChildren()) do
+			if x:IsA("JointInstance") or x:IsA("WeldConstraint") then
+				return true
+			end
+		end
+		return false
+	end
 	for _, d in ipairs(mdl:GetDescendants()) do
-		if d:IsA("BasePart") and d ~= main and not tpHasJoint(d) then
+		if d:IsA("BasePart") and d ~= ref and not hasJoint(d) then
 			local w = Instance.new("Weld")
 			w.Name = "TP_AutoWeld"
-			w.Part0 = main
+			w.Part0 = ref
 			w.Part1 = d
-			w.C0 = main.CFrame:Inverse() * d.CFrame
+			w.C0 = ref.CFrame:Inverse() * d.CFrame
 			w.C1 = CFrame.new()
-			w.Parent = main
+			w.Parent = ref
 		end
 	end
-
+	local target = hand.CFrame * recipe.c0
+	local delta = target * ref.CFrame:Inverse()
+	for _, d in ipairs(mdl:GetDescendants()) do
+		if d:IsA("BasePart") then
+			pcall(function() d.CFrame = delta * d.CFrame end)
+		end
+	end
 	local weld = Instance.new("Weld")
 	weld.Name = "TP_HandWeld"
-	if native then
-		-- 照抄游戏的 C0/C1 与 Part0/Part1 角色
-		if native.handIsPart0 then
-			weld.Part0, weld.Part1 = hand, main
-			tpMove(mdl, main, hand.CFrame * native.C0 * native.C1:Inverse())
-		else
-			weld.Part0, weld.Part1 = main, hand
-			tpMove(mdl, main, hand.CFrame * native.C1 * native.C0:Inverse())
-		end
-		weld.C0, weld.C1 = native.C0, native.C1
-	else
-		weld.Part0, weld.Part1 = hand, main
-		weld.C0, weld.C1 = tpOffset(), CFrame.new()
-		tpMove(mdl, main, hand.CFrame * weld.C0)
-	end
+	weld.Part0 = hand
+	weld.Part1 = ref
+	weld.C0 = recipe.c0
+	weld.C1 = CFrame.new()
 	weld.Parent = hand
 	return weld
 end
 
--- 驱动：0.1 秒检查；偏移实时生效；每 4 秒重建一次以跟随外观/皮肤颜色
+-- 驱动：0.1 秒检查；偏移实时生效；每 6 秒重建一次以跟随皮肤 / 外观颜色
 task.spawn(function()
 	while task.wait(0.1) do
 		if Library.Unloaded then
 			tpClear()
 			return
 		end
-		local camState = getgenv().CameraState
-		local wantOn = TPW.On and type(camState) == "table" and camState.TP == true
-			and not isSpectating()
+		local cs = getgenv().CameraState
+		local wantOn = TPW.On and type(cs) == "table" and cs.TP == true and not isSpectating()
 		if not wantOn then
 			if tpModel then
 				tpClear()
@@ -3881,34 +3983,39 @@ task.spawn(function()
 			else
 				local now = os.clock()
 				local stale = (tpModel == nil) or (tpModel.Parent == nil)
-					or (tpName ~= name) or (now - tpBuilt > 4)
+					or (tpName ~= name) or (now - tpBuilt > 6)
 				if stale then
 					tpClear()
 					local mdl = tpBuildModel(name)
 					if mdl then
-						local native
+						local rec
 						if TPW.UseNative then
-							native = tpFindNative(tpKey(mdl))
+							rec = tpFindNative(name, mdl, tpParts(mdl))
 						end
-						local ok, w = pcall(tpAttach, mdl, char, native)
-						if ok and w then
-							tpModel, tpWeld, tpName, tpBuilt = mdl, w, name, now
-							tpErr = nil
-							if native then
-								tpSrcTag = (tpSrcTag or "") .. " + 抄自 " .. native.from
+						local tag = tpSrcTag
+						if not rec then
+							rec = tpAutoAlign(char, mdl)
+							if rec then
+								tag = (tag or "") .. " + 自动对齐（可用滑块微调）"
+							end
+						end
+						if rec then
+							tpBase = rec.c0
+							local ok, w = pcall(tpAttach, mdl, char, rec)
+							if ok and w then
+								tpModel, tpWeld, tpName, tpBuilt = mdl, w, name, now
+								tpSrcTag, tpErr = tag, nil
 							else
-								tpSrcTag = (tpSrcTag or "") .. " + 滑块兜底"
+								pcall(function() mdl:Destroy() end)
 							end
 						else
 							pcall(function() mdl:Destroy() end)
 						end
 					end
-				elseif tpWeld and tpWeld.Parent then
-					if not TPW.UseNative then
-						pcall(function()
-							tpWeld.C0 = tpOffset()
-						end)
-					end
+				elseif tpWeld and tpWeld.Parent and tpBase then
+					pcall(function()
+						tpWeld.C0 = tpBase * tpOffset()
+					end)
 				end
 			end
 		end
@@ -3921,25 +4028,25 @@ getgenv().TPWeaponCleanup = function()
 end
 
 getgenv().TPWeaponStatus = function()
-	local camState = getgenv().CameraState
+	local cs = getgenv().CameraState
 	print(("[手持模型] 开关=%s 第三人称=%s 观战=%s 武器=%s"):format(
-		tostring(TPW.On), tostring(camState and camState.TP),
-		tostring(isSpectating()), tostring(tpName)))
-	print(("[手持模型] 来源=%s | 失败原因=%s"):format(tostring(tpSrcTag), tostring(tpErr)))
+		tostring(TPW.On), tostring(cs and cs.TP), tostring(isSpectating()), tostring(tpName)))
+	print(("[手持模型] 模型来源=%s | 问题=%s"):format(tostring(tpSrcTag), tostring(tpErr)))
+	if tpBase then
+		print(("[手持模型] 基准 C0=%s | 当前微调=%s"):format(tostring(tpBase), tostring(tpOffset())))
+	end
+	if #tpDiag > 0 then
+		print("[手持模型] 候选（玩家/模型 相似度）: " .. table.concat(tpDiag, ", "))
+	end
 	if tpModel then
-		local main = tpModel.PrimaryPart
-		print(("[手持模型] 模型=%s 部件=%d 主部件=%s"):format(
-			tpModel.Name, tpCount(tpModel), main and main.Name or "nil"))
-		if tpWeld then
-			print(("[手持模型] 焊缝 Part0=%s Part1=%s | C0=%s"):format(
-				tpWeld.Part0 and tpWeld.Part0.Name or "?",
-				tpWeld.Part1 and tpWeld.Part1.Name or "?", tostring(tpWeld.C0)))
-		end
-		if main then
+		print(("[手持模型] 部件=%d 参照=%s"):format(
+			tpCount(tpModel), tpWeld and tpWeld.Part1 and tpWeld.Part1.Name or "?"))
+		local ref = tpWeld and tpWeld.Part1
+		if ref and ref:IsA("BasePart") then
 			local cam = workspace.CurrentCamera
-			local sp, onScreen = cam:WorldToViewportPoint(main.Position)
+			local sp, onScreen = cam:WorldToViewportPoint(ref.Position)
 			print(("[手持模型] 屏幕=(%.0f,%.0f) 可见=%s 距相机=%.1f"):format(
-				sp.X, sp.Y, tostring(onScreen), (cam.CFrame.Position - main.Position).Magnitude))
+				sp.X, sp.Y, tostring(onScreen), (cam.CFrame.Position - ref.Position).Magnitude))
 		end
 	end
 end
@@ -3957,7 +4064,7 @@ TPBox:AddToggle("TPW_On", {
 			tpClear()
 		else
 			tpBuilt = 0
-			task.delay(0.6, function()
+			task.delay(0.8, function()
 				if TPW.On then
 					getgenv().TPWeaponStatus()
 				end
@@ -3967,9 +4074,9 @@ TPBox:AddToggle("TPW_On", {
 })
 
 TPBox:AddToggle("TPW_Native", {
-	Text = "使用游戏原生偏移（推荐）",
+	Text = "自动对齐（抄游戏的握枪位置）",
 	Default = TPW.UseNative,
-	Tooltip = "扫场上拿着同款枪的玩家，抄它的焊点数值 → 和敌人手里的枪完全一致。关掉则用下面的滑块手调",
+	Tooltip = "扫场上拿着同款枪的玩家，抄它的焊点数值 → 和敌人手里的枪完全一致。关掉则只按角色朝向摆放",
 	Callback = function(v)
 		TPW.UseNative = v
 		tpBuilt = 0
@@ -3983,14 +4090,11 @@ TPBox:AddDropdown("TPW_Src", {
 	Searchable = false,
 	Callback = function(v)
 		if v == "仅工厂" then
-			TPW.ForceFactory = true
-			TPW.NoFactory = false
+			TPW.OnlyFactory, TPW.NoFactory = true, false
 		elseif v == "仅第一人称克隆" then
-			TPW.NoFactory = true
-			TPW.ForceFactory = false
+			TPW.OnlyFactory, TPW.NoFactory = false, true
 		else
-			TPW.ForceFactory = false
-			TPW.NoFactory = false
+			TPW.OnlyFactory, TPW.NoFactory = false, false
 		end
 		tpBuilt = 0
 	end,
@@ -4008,43 +4112,59 @@ TPBox:AddSlider("TPW_Scale", {
 TPBox:AddDivider()
 
 TPBox:AddSlider("TPW_PosX", {
-	Text = "位置 X（仅滑块兜底）", Default = TPW.PosX, Min = -3, Max = 3, Rounding = 2,
+	Text = "微调 X", Default = TPW.PosX, Min = -1, Max = 1, Rounding = 2,
 	Callback = function(v) TPW.PosX = v end,
 })
 TPBox:AddSlider("TPW_PosY", {
-	Text = "位置 Y（仅滑块兜底）", Default = TPW.PosY, Min = -3, Max = 3, Rounding = 2,
+	Text = "微调 Y", Default = TPW.PosY, Min = -1, Max = 1, Rounding = 2,
 	Callback = function(v) TPW.PosY = v end,
 })
 TPBox:AddSlider("TPW_PosZ", {
-	Text = "位置 Z（仅滑块兜底）", Default = TPW.PosZ, Min = -3, Max = 3, Rounding = 2,
+	Text = "微调 Z", Default = TPW.PosZ, Min = -1, Max = 1, Rounding = 2,
 	Callback = function(v) TPW.PosZ = v end,
 })
 TPBox:AddSlider("TPW_RotX", {
-	Text = "旋转 X（仅滑块兜底）", Default = TPW.RotX, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Text = "微调旋转 X", Default = TPW.RotX, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
 	Callback = function(v) TPW.RotX = v end,
 })
 TPBox:AddSlider("TPW_RotY", {
-	Text = "旋转 Y（仅滑块兜底）", Default = TPW.RotY, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Text = "微调旋转 Y", Default = TPW.RotY, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
 	Callback = function(v) TPW.RotY = v end,
 })
 TPBox:AddSlider("TPW_RotZ", {
-	Text = "旋转 Z（仅滑块兜底）", Default = TPW.RotZ, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
+	Text = "微调旋转 Z", Default = TPW.RotZ, Min = -180, Max = 180, Rounding = 1, Suffix = " °",
 	Callback = function(v) TPW.RotZ = v end,
 })
 
 TPBox:AddDivider()
 
 TPBox:AddButton({
-	Text = "刷新模型",
-	Tooltip = "立即重建（换枪、改外观后想立刻看到效果时用）",
+	Text = "刷新模型（重新对齐）",
+	Tooltip = "丢掉缓存重新抄一次；换枪后想立刻生效也点这个",
 	Func = function()
+		Cache[TPW.LastWeapon or ""] = nil
 		tpBuilt = 0
 	end,
 })
 
 TPBox:AddButton({
+	Text = "清零微调",
+	Tooltip = "把 6 个微调滑块归 0",
+	Func = function()
+		TPW.PosX, TPW.PosY, TPW.PosZ = 0, 0, 0
+		TPW.RotX, TPW.RotY, TPW.RotZ = 0, 0, 0
+		for _, id in ipairs({ "TPW_PosX", "TPW_PosY", "TPW_PosZ", "TPW_RotX", "TPW_RotY", "TPW_RotZ" }) do
+			local o = Toggles[id] or Options[id]
+			if o and o.SetValue then
+				pcall(function() o:SetValue(0) end)
+			end
+		end
+	end,
+})
+
+TPBox:AddButton({
 	Text = "打印状态（控制台）",
-	Tooltip = "输出开关 / 武器 / 模型来源 / 失败原因 / 屏幕位置，排查用",
+	Tooltip = "输出模型来源 / 相似度 / 基准偏移，排查用",
 	Func = function()
 		getgenv().TPWeaponStatus()
 	end,
@@ -4053,86 +4173,71 @@ TPBox:AddButton({
 end -- ★ 节 6.11 结束
 
 --// ======================== 6.12 世界 · 天空盒（本机） ========================
--- 探测结论：游戏用的是标准 Sky 实例，名为 "Realistic Clouds"
---   SkyboxBk/Dn/Ft/Lf/Rt/Up + SunTextureId / MoonTextureId / StarCount /
---   SunAngularSize / MoonAngularSize / CelestialBodiesShown
--- 换天空盒 = 直接改这 6 张贴图 + 日月参数，无需自建穹顶
--- 原始值快照在 getgenv().SkyOrig，重贴会先还原；我们自己新建的 Sky 会销毁，游戏原有的只还原数值
+-- 探测结论：游戏自带光照 / 天空资源在 ReplicatedStorage.Assets.Lighting/<地图名>/
+--   每个地图文件夹里有一个 Sky（名字各异：Realistic Clouds / Realistic Skybox / Sky / Deep Blue Sky）
+--   → 直接把这些文件夹当预设，不用手填贴图 ID
+-- 原始值快照在 getgenv().SkyOrig，重贴脚本先还原，不会把改过的值当原值
+-- 只改本机 Lighting：其他玩家看到的是原样
 do
 
 local Lighting = game:GetService("Lighting")
-local SKY_FACES = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp" }
+local FACES = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp" }
+local OFF = "不使用（原版）"
 
-local SK = getgenv().SkyState
-if type(SK) ~= "table" then
-	SK = {}
-	getgenv().SkyState = SK
-end
-for k, v in pairs({
-	On = false,
-	StarCount = 3000,
-	Celestial = true,
-	SunOn = false, SunId = "", SunSize = 6,
-	MoonOn = false, MoonId = "", MoonSize = 2,
-}) do
-	if SK[k] == nil then
-		SK[k] = v
-	end
-end
-for _, f in ipairs(SKY_FACES) do
-	if SK[f] == nil then
-		SK[f] = ""
-	end
-end
+local PROPS = {
+	Sky = { "SkyboxBk", "SkyboxDn", "SkyboxFt", "SkyboxLf", "SkyboxRt", "SkyboxUp",
+		"SunTextureId", "MoonTextureId", "StarCount", "SunAngularSize", "MoonAngularSize", "CelestialBodiesShown" },
+	Atmosphere = { "Density", "Offset", "Color", "Decay", "Glare", "Haze" },
+	ColorCorrectionEffect = { "Enabled", "Brightness", "Contrast", "Saturation", "TintColor" },
+	BloomEffect = { "Enabled", "Intensity", "Size", "Threshold" },
+	SunRaysEffect = { "Enabled", "Intensity", "Spread" },
+	DepthOfFieldEffect = { "Enabled", "FocusDistance", "InFocusRadius", "NearIntensity", "FarIntensity" },
+}
 
--- ---------- 原始值：只快照一次；重贴先还原 ----------
-local SkyOrig = getgenv().SkyOrig
-if type(SkyOrig) ~= "table" then
+-- ---------- 原始值快照（只做一次）----------
+local Orig = getgenv().SkyOrig
+if type(Orig) ~= "table" or type(Orig.Classes) ~= "table" then
 	local s = Lighting:FindFirstChildOfClass("Sky")
-	SkyOrig = { Existed = s ~= nil, Created = false, Faces = {} }
-	for _, f in ipairs(SKY_FACES) do
-		SkyOrig.Faces[f] = s and s[f] or ""
+	Orig = { Faces = {}, HadSky = s ~= nil, Created = false, Classes = {} }
+	for _, f in ipairs(FACES) do
+		Orig.Faces[f] = s and s[f] or ""
 	end
-	SkyOrig.StarCount = s and s.StarCount or 3000
-	SkyOrig.CelestialBodiesShown = s and s.CelestialBodiesShown or true
-	SkyOrig.SunTextureId = s and s.SunTextureId or ""
-	SkyOrig.MoonTextureId = s and s.MoonTextureId or ""
-	SkyOrig.SunAngularSize = s and s.SunAngularSize or 0
-	SkyOrig.MoonAngularSize = s and s.MoonAngularSize or 0
-	getgenv().SkyOrig = SkyOrig
-end
-
-local function skyRestoreOrig()
-	local s = Lighting:FindFirstChildOfClass("Sky")
-	if s then
-		for _, f in ipairs(SKY_FACES) do
-			if SkyOrig.Faces[f] ~= "" then
-				pcall(function() s[f] = SkyOrig.Faces[f] end)
+	Orig.StarCount = s and s.StarCount or 3000
+	Orig.CelestialBodiesShown = s and s.CelestialBodiesShown or true
+	Orig.SunTextureId = s and s.SunTextureId or ""
+	Orig.MoonTextureId = s and s.MoonTextureId or ""
+	Orig.SunAngularSize = s and s.SunAngularSize or 0
+	Orig.MoonAngularSize = s and s.MoonAngularSize or 0
+	for cls, props in pairs(PROPS) do
+		if cls ~= "Sky" then
+			local e = Lighting:FindFirstChildOfClass(cls)
+			if e then
+				local t = {}
+				for _, p in ipairs(props) do
+					local ok, v = pcall(function() return e[p] end)
+					if ok and v ~= nil then
+						t[p] = v
+					end
+				end
+				Orig.Classes[cls] = t
 			end
 		end
-		pcall(function()
-			s.StarCount = SkyOrig.StarCount
-			s.CelestialBodiesShown = SkyOrig.CelestialBodiesShown
-			s.SunTextureId = SkyOrig.SunTextureId
-			s.MoonTextureId = SkyOrig.MoonTextureId
-			s.SunAngularSize = SkyOrig.SunAngularSize
-			s.MoonAngularSize = SkyOrig.MoonAngularSize
-		end)
 	end
-	if SkyOrig.Created and not SkyOrig.Existed then
-		local x = Lighting:FindFirstChildOfClass("Sky")
-		if x then
-			pcall(function() x:Destroy() end)
-		end
-		SkyOrig.Created = false
+	getgenv().SkyOrig = Orig
+end
+
+local SKS = getgenv().SkyState
+if type(SKS) ~= "table" then
+	SKS = {}
+	getgenv().SkyState = SKS
+end
+for k, v in pairs({ Preset = OFF, StarCount = 3000, Celestial = true, WithEffects = true }) do
+	if SKS[k] == nil then
+		SKS[k] = v
 	end
 end
 
-skyRestoreOrig()
-
-SK.On, SK.SunOn, SK.MoonOn = false, false, false
-
-local function skyGet(create)
+local function skyInst(create)
 	local s = Lighting:FindFirstChildOfClass("Sky")
 	if s then
 		return s
@@ -4140,172 +4245,218 @@ local function skyGet(create)
 	if not create then
 		return nil
 	end
-	local ok, ns = pcall(function()
-		local n = Instance.new("Sky")
-		n.Name = "BeautifySky"
-		n.Parent = Lighting
-		return n
+	local ok, n = pcall(function()
+		local x = Instance.new("Sky")
+		x.Name = "BeautifySky"
+		x.Parent = Lighting
+		return x
 	end)
-	if ok and ns then
-		SkyOrig.Created = true
-		return ns
+	if ok and n then
+		Orig.Created = true
+		return n
 	end
 	return nil
 end
 
-local function skyAnyOn()
-	return SK.On or SK.SunOn or SK.MoonOn
+local function effInst(cls, create)
+	local e = Lighting:FindFirstChildOfClass(cls)
+	if e or not create then
+		return e
+	end
+	local ok, n = pcall(function()
+		local x = Instance.new(cls)
+		x.Name = "Beautify" .. cls
+		x.Parent = Lighting
+		return x
+	end)
+	return ok and n or nil
+end
+
+local function skyRestore()
+	local s = Lighting:FindFirstChildOfClass("Sky")
+	if s then
+		for _, f in ipairs(FACES) do
+			if Orig.Faces[f] ~= "" then
+				pcall(function() s[f] = Orig.Faces[f] end)
+			end
+		end
+		pcall(function()
+			s.StarCount = Orig.StarCount
+			s.CelestialBodiesShown = Orig.CelestialBodiesShown
+			s.SunTextureId = Orig.SunTextureId
+			s.MoonTextureId = Orig.MoonTextureId
+			s.SunAngularSize = Orig.SunAngularSize
+			s.MoonAngularSize = Orig.MoonAngularSize
+		end)
+	end
+	for cls, props in pairs(Orig.Classes) do
+		local e = Lighting:FindFirstChildOfClass(cls)
+		if e then
+			for p, v in pairs(props) do
+				pcall(function() e[p] = v end)
+			end
+		end
+	end
+	if Orig.Created and not Orig.HadSky then
+		local x = Lighting:FindFirstChildOfClass("Sky")
+		if x then
+			pcall(function() x:Destroy() end)
+		end
+		Orig.Created = false
+	end
+end
+
+skyRestore() -- 重贴 / 首载先还原
+
+-- ---------- 预设：从 RS.Assets.Lighting 实时读 ----------
+local Presets = {}
+
+local function discover()
+	Presets = {}
+	local root = RS:FindFirstChild("Assets")
+	root = root and root:FindFirstChild("Lighting")
+	if not root then
+		return
+	end
+	for _, folder in ipairs(root:GetChildren()) do
+		local entry = { name = folder.Name, classes = {} }
+		for cls, props in pairs(PROPS) do
+			local inst = folder:FindFirstChildWhichIsA(cls, true)
+			if inst then
+				local t = {}
+				for _, p in ipairs(props) do
+					local ok, v = pcall(function() return inst[p] end)
+					if ok and v ~= nil then
+						t[p] = v
+					end
+				end
+				entry.classes[cls] = t
+			end
+		end
+		if entry.classes.Sky then
+			Presets[#Presets + 1] = entry
+		end
+	end
+	table.sort(Presets, function(a, b)
+		return a.name:lower() < b.name:lower()
+	end)
+end
+discover()
+
+local function presetByName(nm)
+	for _, p in ipairs(Presets) do
+		if p.name == nm then
+			return p
+		end
+	end
+	return nil
+end
+
+local function presetValues()
+	local t = { OFF }
+	for _, p in ipairs(Presets) do
+		t[#t + 1] = p.name
+	end
+	return t
 end
 
 local function skyApply()
-	pcall(function()
-		skyRestoreOrig()
-		if not skyAnyOn() then
-			return
+	skyRestore()
+	local p = SKS.Preset and presetByName(SKS.Preset) or nil
+	if not p then
+		return
+	end
+	local sp = p.classes.Sky
+	local s = skyInst(true)
+	if s then
+		for _, f in ipairs(FACES) do
+			local v = sp[f]
+			if type(v) == "string" and v ~= "" then
+				pcall(function() s[f] = v end)
+			end
 		end
-		local s = skyGet(true)
-		if not s then
-			return
+		pcall(function() s.StarCount = math.floor(math.clamp(SKS.StarCount, 0, 20000)) end)
+		pcall(function() s.CelestialBodiesShown = SKS.Celestial end)
+		if type(sp.SunTextureId) == "string" then
+			pcall(function() s.SunTextureId = sp.SunTextureId end)
 		end
-		if SK.On then
-			for _, f in ipairs(SKY_FACES) do
-				local id = SK[f]
-				if type(id) == "string" and id ~= "" then
-					s[f] = id
+		if type(sp.MoonTextureId) == "string" then
+			pcall(function() s.MoonTextureId = sp.MoonTextureId end)
+		end
+		if type(sp.SunAngularSize) == "number" then
+			pcall(function() s.SunAngularSize = sp.SunAngularSize end)
+		end
+		if type(sp.MoonAngularSize) == "number" then
+			pcall(function() s.MoonAngularSize = sp.MoonAngularSize end)
+		end
+	end
+	if SKS.WithEffects then
+		for _, cls in ipairs({
+			"Atmosphere", "ColorCorrectionEffect", "BloomEffect", "SunRaysEffect", "DepthOfFieldEffect",
+		}) do
+			local props = p.classes[cls]
+			if props then
+				local e = effInst(cls, true)
+				if e then
+					for k, v in pairs(props) do
+						pcall(function() e[k] = v end)
+					end
 				end
 			end
-			s.StarCount = math.floor(math.clamp(SK.StarCount, 0, 20000))
 		end
-		s.CelestialBodiesShown = SK.Celestial
-		if SK.SunOn then
-			if SK.SunId ~= "" then
-				s.SunTextureId = SK.SunId
-			end
-			s.SunAngularSize = SK.SunSize
-		end
-		if SK.MoonOn then
-			if SK.MoonId ~= "" then
-				s.MoonTextureId = SK.MoonId
-			end
-			s.MoonAngularSize = SK.MoonSize
-		end
-	end)
+	end
 end
 
 getgenv().SkyCleanup = function()
-	SK.On, SK.SunOn, SK.MoonOn = false, false, false
-	skyRestoreOrig()
+	SKS.Preset = OFF
+	skyRestore()
 end
 
 getgenv().SkyReport = function()
 	local s = Lighting:FindFirstChildOfClass("Sky")
-	if not s then
-		print("[天空盒] 当前没有 Sky 实例")
-		return
-	end
-	print(("[天空盒] %s | StarCount=%d Celestial=%s Sun=%.1f Moon=%.1f"):format(
-		s.Name, s.StarCount, tostring(s.CelestialBodiesShown), s.SunAngularSize, s.MoonAngularSize))
-	print(("[天空盒] Bk=%s Dn=%s Ft=%s Lf=%s Rt=%s Up=%s"):format(
-		s.SkyboxBk, s.SkyboxDn, s.SkyboxFt, s.SkyboxLf, s.SkyboxRt, s.SkyboxUp))
-	print(("[天空盒] Sun=%s Moon=%s | 原始: Bk=%s StarCount=%d"):format(
-		s.SunTextureId, s.MoonTextureId, SkyOrig.Faces.SkyboxBk, SkyOrig.StarCount))
-end
-
-getgenv().SkyProbe = function()
-	local out = {}
-	local function P(s)
-		out[#out + 1] = s
-	end
-	P("=== Lighting 子实例 ===")
-	for _, c in ipairs(Lighting:GetChildren()) do
-		P(("  %s [%s]"):format(c.Name, c.ClassName))
-	end
-	local s = Lighting:FindFirstChildOfClass("Sky")
+	print(("[天空盒] 预设数=%d | 当前选择=%s"):format(#Presets, tostring(SKS.Preset)))
 	if s then
-		P("=== 当前 Sky ===")
-		for _, f in ipairs(SKY_FACES) do
-			P(("  %s = %s"):format(f, s[f]))
-		end
-		P(("  Sun=%s Moon=%s StarCount=%d SunAngular=%s MoonAngular=%s"):format(
-			s.SunTextureId, s.MoonTextureId, s.StarCount,
-			tostring(s.SunAngularSize), tostring(s.MoonAngularSize)))
-	end
-	P("=== RS.Assets.Lighting（游戏自带光照 / 天空资源）===")
-	local assets = RS:FindFirstChild("Assets")
-	local ln = assets and assets:FindFirstChild("Lighting")
-	if not ln then
-		P("  （没有 Assets.Lighting）")
+		print(("[天空盒] Sky '%s' Bk=%s | StarCount=%d Celestial=%s Sun=%.1f Moon=%.1f"):format(
+			s.Name, s.SkyboxBk, s.StarCount, tostring(s.CelestialBodiesShown),
+			s.SunAngularSize, s.MoonAngularSize))
 	else
-		local function rec(inst, d)
-			if d > 3 then
-				return
-			end
-			local ind = string.rep("  ", d)
-			local extra = ""
-			for _, pn in ipairs({ "Texture", "TextureId", "Image", "SkyboxBk", "SkyboxUp" }) do
-				local ok, v = pcall(function()
-					return inst[pn]
-				end)
-				if ok and type(v) == "string" and v ~= "" then
-					extra = "  " .. pn .. "=" .. v
-					break
-				end
-			end
-			P(("%s%s [%s]%s"):format(ind, inst.Name, inst.ClassName, extra))
-			for _, c in ipairs(inst:GetChildren()) do
-				rec(c, d + 1)
-			end
-		end
-		for _, c in ipairs(ln:GetChildren()) do
-			rec(c, 0)
-		end
+		print("[天空盒] 当前没有 Sky 实例")
 	end
-	local text = table.concat(out, "\n")
-	print(text)
-	if type(setclipboard) == "function" then
-		pcall(setclipboard, text)
-		print("[天空盒] 已复制到剪贴板")
+	local names = {}
+	for _, p in ipairs(Presets) do
+		names[#names + 1] = p.name
 	end
+	print("[天空盒] 可用预设: " .. (table.concat(names, ", ")))
 end
 
---== 世界页：天空盒（右栏）==
+--== 世界页：天空盒 ==
 local SkyBox = Tabs.World:AddRightGroupbox("天空盒")
 
-SkyBox:AddToggle("SK_On", {
-	Text = "启用自定义天空盒",
-	Default = false,
-	Tooltip = "替换 6 面贴图与星星数量；关闭即还原成游戏原版",
+SkyBox:AddDropdown("SK_Preset", {
+	Text = "天空预设（游戏自带地图）",
+	Values = presetValues(),
+	Default = OFF,
+	Searchable = false,
+	Tooltip = "取自 ReplicatedStorage.Assets.Lighting/<地图名>；选「不使用」即还原",
 	Callback = function(v)
-		SK.On = v
+		SKS.Preset = v
+		local p = presetByName(v)
+		if p and type(p.classes.Sky.StarCount) == "number" then
+			local o = Options.SK_Star or Toggles.SK_Star
+			if o and o.SetValue then
+				pcall(function() o:SetValue(p.classes.Sky.StarCount) end)
+			end
+		end
 		task.defer(skyApply)
 	end,
 })
 
-for _, f in ipairs(SKY_FACES) do
-	local label = ({ SkyboxBk = "后 Bk", SkyboxDn = "下 Dn", SkyboxFt = "前 Ft",
-		SkyboxLf = "左 Lf", SkyboxRt = "右 Rt", SkyboxUp = "上 Up" })[f]
-	SkyBox:AddInput("SK_" .. f, {
-		Text = "天空贴图 · " .. label,
-		Default = "",
-		Placeholder = "rbxassetid:// 或留空 = 不改",
-		Finished = true,
-		Tooltip = "留空则保留原贴图",
-		Callback = function(v)
-			SK[f] = (type(v) == "string") and v or ""
-			if SK.On then
-				task.defer(skyApply)
-			end
-		end,
-	})
-end
-
 SkyBox:AddSlider("SK_Star", {
-	Text = "星星数量",
-	Default = SK.StarCount, Min = 0, Max = 20000, Rounding = 0,
+	Text = "星星数量", Default = SKS.StarCount, Min = 0, Max = 20000, Rounding = 0,
 	Tooltip = "0 = 没有星星",
 	Callback = function(v)
-		SK.StarCount = v
-		if SK.On then
+		SKS.StarCount = v
+		if SKS.Preset ~= OFF then
 			task.defer(skyApply)
 		end
 	end,
@@ -4313,92 +4464,42 @@ SkyBox:AddSlider("SK_Star", {
 
 SkyBox:AddToggle("SK_Celestial", {
 	Text = "显示天体（太阳 / 月亮）",
-	Default = SK.Celestial,
+	Default = SKS.Celestial,
 	Callback = function(v)
-		SK.Celestial = v
-		if skyAnyOn() then
+		SKS.Celestial = v
+		if SKS.Preset ~= OFF then
 			task.defer(skyApply)
 		end
 	end,
 })
 
-SkyBox:AddDivider()
-
-SkyBox:AddToggle("SK_SunOn", {
-	Text = "自定义太阳",
-	Default = false,
+SkyBox:AddToggle("SK_Effects", {
+	Text = "同时套用该地图的氛围与画面效果",
+	Default = SKS.WithEffects,
+	Tooltip = "Atmosphere / 色彩校正 / 泛光 / 太阳光线 / 景深。与「世界滤镜」同时开时后写的生效",
 	Callback = function(v)
-		SK.SunOn = v
+		SKS.WithEffects = v
 		task.defer(skyApply)
-	end,
-})
-SkyBox:AddInput("SK_SunId", {
-	Text = "太阳贴图",
-	Default = "",
-	Placeholder = "留空 = 用原贴图",
-	Finished = true,
-	Callback = function(v)
-		SK.SunId = (type(v) == "string") and v or ""
-		if SK.SunOn then
-			task.defer(skyApply)
-		end
-	end,
-})
-SkyBox:AddSlider("SK_SunSize", {
-	Text = "太阳大小",
-	Default = SK.SunSize, Min = 0, Max = 30, Rounding = 1,
-	Callback = function(v)
-		SK.SunSize = v
-		if SK.SunOn then
-			task.defer(skyApply)
-		end
-	end,
-})
-
-SkyBox:AddToggle("SK_MoonOn", {
-	Text = "自定义月亮",
-	Default = false,
-	Callback = function(v)
-		SK.MoonOn = v
-		task.defer(skyApply)
-	end,
-})
-SkyBox:AddInput("SK_MoonId", {
-	Text = "月亮贴图",
-	Default = "",
-	Placeholder = "留空 = 用原贴图",
-	Finished = true,
-	Callback = function(v)
-		SK.MoonId = (type(v) == "string") and v or ""
-		if SK.MoonOn then
-			task.defer(skyApply)
-		end
-	end,
-})
-SkyBox:AddSlider("SK_MoonSize", {
-	Text = "月亮大小",
-	Default = SK.MoonSize, Min = 0, Max = 30, Rounding = 1,
-	Callback = function(v)
-		SK.MoonSize = v
-		if SK.MoonOn then
-			task.defer(skyApply)
-		end
 	end,
 })
 
 SkyBox:AddDivider()
 
 SkyBox:AddButton({
-	Text = "探测天空资源（控制台 / 剪贴板）",
-	Tooltip = "列出 Lighting 与 RS.Assets.Lighting，方便挑贴图 ID",
+	Text = "重新扫描预设",
+	Tooltip = "重新读一次 RS.Assets.Lighting（游戏换图 / 更新后点）",
 	Func = function()
-		getgenv().SkyProbe()
+		discover()
+		local o = Options.SK_Preset or Toggles.SK_Preset
+		if o and o.SetValues then
+			pcall(function() o:SetValues(presetValues()) end)
+		end
+		Library:Notify(("已发现 %d 个天空预设"):format(#Presets), 3)
 	end,
 })
 
 SkyBox:AddButton({
-	Text = "打印当前天空状态",
-	Tooltip = "输出 6 面贴图与日月参数",
+	Text = "打印当前天空（控制台）",
 	Func = function()
 		getgenv().SkyReport()
 	end,
@@ -4406,14 +4507,17 @@ SkyBox:AddButton({
 
 SkyBox:AddButton({
 	Text = "还原天空盒",
-	Tooltip = "立即恢复游戏原版天空",
+	Tooltip = "立即恢复游戏原版天空与氛围",
 	Func = function()
-		Toggles.SK_On:SetValue(false)
-		Toggles.SK_SunOn:SetValue(false)
-		Toggles.SK_MoonOn:SetValue(false)
+		local o = Options.SK_Preset or Toggles.SK_Preset
+		if o and o.SetValue then
+			pcall(function() o:SetValue(OFF) end)
+		end
 		getgenv().SkyCleanup()
 	end,
 })
+
+SkyBox:AddLabel(("已发现 %d 个预设"):format(#Presets), true)
 
 end -- ★ 节 6.12 结束
 
@@ -4817,8 +4921,8 @@ Library:OnUnload(function()
 	pcall(function() getgenv().CameraCleanup() end)
 	pcall(function() getgenv().WorldCleanup() end)
 	pcall(function() getgenv().TPWeaponCleanup() end)
-	pcall(function() getgenv().SkyCleanup() end) -- ★ v22 新增：还原天空盒
+	pcall(function() getgenv().SkyCleanup() end)
 end)
 
-print("[美化菜单 v22] 初始化完成")
+print("[美化菜单 v23] 初始化完成")
 pcall(function() Library:Notify("美化菜单已加载", 3) end)
