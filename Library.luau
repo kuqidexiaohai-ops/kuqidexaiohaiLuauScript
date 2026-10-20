@@ -287,7 +287,8 @@ local Library = {
     Notify = nil;
     NotifySide = "Left";
     ShowCustomCursor = true;
-    ShowToggleFrameInKeybinds = true;
+    -- ShowToggleFrameInKeybinds 已废弃：按键面板的显隐现在完全由「模式 + 状态」决定，
+    -- 见 KeyPicker:ShouldShowInKeybindFrame()
     NotifyOnError = false; -- true = Library:Notify for SafeCallback (still warns in the developer console)
 
     -- addons --
@@ -1210,13 +1211,13 @@ do
             ChangedCallback = Info.ChangedCallback or function(New) end;
             SyncToggleState = Info.SyncToggleState or false;
 
-            --// 按键绑定面板显示策略：
-            --//   "Always"（默认）始终常驻；
-            --//   "Active" 仅在该按键处于激活状态时出现（按住类按键 = 按下期间，切换类 = 打开期间）；
-            --//   "Hidden" 从不显示。
-            KeybindFrameVisibility = if Info.ShowInKeybindFrame == false then "Hidden"
-                elseif Info.KeybindFrameVisibility == "Active" or Info.KeybindFrameVisibility == "Hidden" then Info.KeybindFrameVisibility
-                else "Always";
+            --// 按键绑定面板显示规则（没有独立的显隐策略了，只看模式 + 状态）：
+            --//   "始终" → 绑定后一直挂在面板里；
+            --//   "切换" → 打开时出现，关闭时消失；
+            --//   "按住" → 只有按住该键的那段时间出现；
+            --//   "按下" → 同「按住」，按一下闪一下。
+            --// 只保留一个硬开关：ShowInKeybindFrame = false 时永不进面板。
+            ShowInKeybindFrame = Info.ShowInKeybindFrame ~= false;
         }
 
         if KeyPicker.Mode == "Press" then
@@ -1393,9 +1394,17 @@ do
 
         local KeybindsToggle = {}
         do
+            --// 行高 / 字号 / 指示块尺寸一律按像素算，不掺 DPIScale，
+            --// 这样"条目高度"和"面板高度"用同一套单位，边框才不会被内容顶出去 \\--
+            local RowBaseHeight = 19
+            local LabelBaseTextSize = 14
+            local LabelMinTextSize = 11
+            local IndicatorSize = 13
+            local IndicatorGap = 6
+
             local KeybindsToggleContainer = Library:Create("Frame", {
                 BackgroundTransparency = 1;
-                Size = UDim2.new(1, 0, 0, 18);
+                Size = UDim2.new(1, 0, 0, RowBaseHeight);
                 Visible = false;
                 ZIndex = 110;
                 Parent = Library.KeybindContainer;
@@ -1404,8 +1413,9 @@ do
             local KeybindsToggleOuter = Library:Create("Frame", {
                 BackgroundColor3 = Color3.new(0, 0, 0);
                 BorderColor3 = Color3.new(0, 0, 0);
-                Size = UDim2.new(0, 13, 0, 13);
-                Position = UDim2.new(0, 0, 0, 6);
+                AnchorPoint = Vector2.new(0, 0.5);
+                Size = UDim2.new(0, IndicatorSize, 0, IndicatorSize);
+                Position = UDim2.new(0, 0, 0.5, 0);
                 Visible = true;
                 ZIndex = 110;
                 Parent = KeybindsToggleContainer;
@@ -1429,31 +1439,29 @@ do
                 BorderColor3 = "OutlineColor";
             })
 
+            --// 文字挂在"整行"上而不是挂在 13px 的指示块里：宽度永远跟着面板走，
+            --// 面板缩窄时先缩字号、再截断，绝不会画到边框外面 \\--
             local KeybindsToggleLabel = Library:CreateLabel({
                 BackgroundTransparency = 1;
-                Size = UDim2.new(0, 216, 1, 0);
-                Position = UDim2.new(1, 6, 0, -1);
-                TextSize = 14;
+                AnchorPoint = Vector2.new(0, 0.5);
+                Position = UDim2.new(0, IndicatorSize + IndicatorGap, 0.5, 0);
+                Size = UDim2.new(1, -(IndicatorSize + IndicatorGap + 2), 1, 0);
+                TextSize = LabelBaseTextSize;
                 Text = "";
                 TextXAlignment = Enum.TextXAlignment.Left;
+                TextYAlignment = Enum.TextYAlignment.Center;
+                TextTruncate = Enum.TextTruncate.AtEnd;
+                TextWrapped = false;
                 ZIndex = 111;
-                Parent = KeybindsToggleInner;
+                Parent = KeybindsToggleContainer;
             })
 
-            Library:Create("UIListLayout", {
-                Padding = UDim.new(0, 4);
-                FillDirection = Enum.FillDirection.Horizontal;
-                HorizontalAlignment = Enum.HorizontalAlignment.Right;
-                VerticalAlignment = Enum.VerticalAlignment.Center;
-                SortOrder = Enum.SortOrder.LayoutOrder;
-                Parent = KeybindsToggleLabel;
-            })
-
+            --// 整行可点：点在文字上也能切状态，不再只有 170px 那一小条区域有反应 \\--
             local KeybindsToggleRegion = Library:Create("Frame", {
                 BackgroundTransparency = 1;
-                Size = UDim2.new(0, 170, 1, 0);
+                Size = UDim2.new(1, 0, 1, 0);
                 ZIndex = 113;
-                Parent = KeybindsToggleOuter;
+                Parent = KeybindsToggleContainer;
             })
 
             Library:OnHighlight(KeybindsToggleRegion, KeybindsToggleOuter,
@@ -1474,24 +1482,46 @@ do
                 Library.RegistryMap[KeybindsToggleLabel].Properties.TextColor3 = State and "AccentColor" or "FontColor"
             end
 
+            --// 文字永远住在自己那一行里：先按可用宽度缩字号，缩到下限还放不下才截断 \\--
+            function KeybindsToggle:FitText()
+                local Free = KeybindsToggleLabel.AbsoluteSize.X
+
+                if Free <= 1 then
+                    KeybindsToggleLabel.TextSize = LabelBaseTextSize
+                    return
+                end
+
+                local Text = KeybindsToggleLabel.Text
+                local Size = LabelBaseTextSize
+
+                while Size > LabelMinTextSize do
+                    local Bounds = TextService:GetTextSize(Text, Size, Library.Font, Vector2.new(100000, 100000))
+                    if Bounds.X <= Free then
+                        break
+                    end
+                    Size = Size - 1
+                end
+
+                KeybindsToggleLabel.TextSize = Size
+            end
+
             function KeybindsToggle:SetText(Text)
-                KeybindsToggleLabel.Text = Text
+                KeybindsToggleLabel.Text = Text or ""
+                KeybindsToggle:FitText()
             end
 
             function KeybindsToggle:SetVisibility(bool)
                 KeybindsToggleContainer.Visible = bool
             end
 
-            function KeybindsToggle:SetNormal(bool)
-                KeybindsToggle.Normal = bool
-
-                KeybindsToggleOuter.BackgroundTransparency = if KeybindsToggle.Normal then 1 else 0
-
-                KeybindsToggleInner.BackgroundTransparency = if KeybindsToggle.Normal then 1 else 0
-                KeybindsToggleInner.BorderSizePixel = if KeybindsToggle.Normal then 0 else 1
-
-                KeybindsToggleLabel.Position = if KeybindsToggle.Normal then UDim2.new(1, -13, 0, -1) else UDim2.new(1, 6, 0, -1)
+            function KeybindsToggle:GetHeight()
+                return KeybindsToggleContainer.Size.Y.Offset
             end
+
+            --// 面板被拖动缩放时重新算一次字号，保证文字始终贴在自己行内 \\--
+            KeybindsToggleContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+                KeybindsToggle:FitText()
+            end)
 
             KeyPicker.DoClick = function(...) end
             Library:GiveSignal(KeybindsToggleRegion.InputBegan:Connect(function(Input)
@@ -1499,7 +1529,8 @@ do
                     return
                 end
 
-                if KeybindsToggle.Normal then return end
+                --// 「始终」恒为真、「按住」是瞬时态，在面板里点它们没有意义；只有「切换」可点 \\--
+                if KeyPicker.Mode ~= "Toggle" then return end
                                         
                 if (Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame()) or Input.UserInputType == Enum.UserInputType.Touch then
                     KeyPicker.Toggled = not KeyPicker.Toggled
@@ -1651,23 +1682,15 @@ do
             end
 
             local State = KeyPicker:GetState()
-            local ShowToggle = Library.ShowToggleFrameInKeybinds and KeyPicker.Mode == "Toggle"
 
-            --// 按策略决定该条目是否出现在按键绑定面板里 \\--
-            local FramePolicy = KeyPicker.KeybindFrameVisibility or "Always"
-            local FrameVisible = FramePolicy ~= "Hidden"
-
-            if FramePolicy == "Active" then
-                FrameVisible = State and KeyPicker.Value ~= "None"
-            end
+            --// 条目显隐只看「模式 + 状态 + 有没有绑定」，规则集中在 ShouldShowInKeybindFrame \\--
+            local FrameVisible = KeyPicker:ShouldShowInKeybindFrame()
 
             if KeyPicker.SyncToggleState and ParentObj.Value ~= State then
                 ParentObj:SetValue(State)
             end
 
             if KeybindsToggle.Loaded then
-                KeybindsToggle:SetNormal(not ShowToggle)
-
                 KeybindsToggle:SetVisibility(FrameVisible)
                 KeybindsToggle:SetText(string.format("[%s] %s (%s)", tostring(KeyPicker.DisplayValue), Info.Text, ModeDisplay[KeyPicker.Mode] or KeyPicker.Mode))
                 KeybindsToggle:Display(State)
@@ -1678,19 +1701,26 @@ do
 
             for _, Frame in next, Library.KeybindContainer:GetChildren() do
                 if Frame:IsA("Frame") and Frame.Visible then
-                    YSize = YSize + 18
+                    --// 行高向条目自己问，字号或行高变了面板会跟着长，不会把内容挤到框外 \\--
+                    local RowHeight = Frame.Size.Y.Offset
+                    YSize = YSize + (if RowHeight > 0 then RowHeight else 19)
+
                     local Label = Frame:FindFirstChild("TextLabel", true)
                     if not Label then continue end
-                    
-                    local LabelSize = Label.TextBounds.X + 20
+
+                    local LabelSize = Label.TextBounds.X + 26
                     if (LabelSize > XSize) then
                         XSize = LabelSize
                     end
                 end
             end
 
-            local AutoWidth = math.max(XSize + 10, 220)
-            local AutoHeight = (YSize + 23 + 6) * DPIScale
+            local MaxWidthCap = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.X) or math.huge
+            local AutoWidth = math.min(math.max(XSize + 10, 220), MaxWidthCap)
+
+            --// 这里不乘 DPIScale：行高是固定像素，一边乘一边不乘就会算出装不下内容的框
+            --// 26 = 标题 20 + 底部留白 4 + 边框 2 \\--
+            local AutoHeight = YSize + 26
 
             if Library.KeybindFrameManual then
                 --// 用户手动缩放过后，只保证不小于内容所需尺寸，不再强制回写自动尺寸 \\--
@@ -1710,42 +1740,80 @@ do
             UpdateMenuOuterPos()
         end
 
+        --// 该绑定键"此刻是否正被按住"：按住 / 按下两种模式共用 \\--
+        local IsMomentarilyActive = function()
+            local Key = KeyPicker.Value
+
+            if Key == "None" or Key == "Unknown" then
+                return false
+            end
+
+            if not AreModifiersHeld(KeyPicker.Modifiers) then
+                return false
+            end
+
+            if InputService:GetFocusedTextBox() then
+                return false
+            end
+
+            local Special = SpecialKeys[Key]
+            if Special ~= nil then
+                return InputService:IsMouseButtonPressed(Special)
+            end
+
+            local KeyCode = Enum.KeyCode[Key]
+            if KeyCode == nil then
+                return false
+            end
+
+            return InputService:IsKeyDown(KeyCode)
+        end
+
+        --// 按键面板显示规则（唯一裁决点）：
+        --//   始终 → 绑定后常驻；
+        --//   切换 → 打开才显示，关闭即消失；
+        --//   按住 / 按下 → 只有按住该键期间显示。
+        function KeyPicker:ShouldShowInKeybindFrame()
+            if KeyPicker.ShowInKeybindFrame == false then
+                return false
+            end
+
+            if KeyPicker.Value == "None" or KeyPicker.Value == "Unknown" then
+                return false
+            end
+
+            if KeyPicker.Mode == "Always" then
+                return true
+            end
+
+            if KeyPicker.Mode == "Toggle" then
+                return KeyPicker.Toggled == true
+            end
+
+            return IsMomentarilyActive()
+        end
+
         function KeyPicker:GetState()
             if KeyPicker.Mode == "Always" then
                 return true
             
             elseif KeyPicker.Mode == "Hold" then
-                local Key = KeyPicker.Value
-                if Key == "None" then
-                    return false
-                end
-
-                if not AreModifiersHeld(KeyPicker.Modifiers) then
-                    return false
-                end
-
-                if SpecialKeys[Key] ~= nil then
-                    return InputService:IsMouseButtonPressed(SpecialKeys[Key]) and not InputService:GetFocusedTextBox()
-                else
-                    return InputService:IsKeyDown(Enum.KeyCode[Key]) and not InputService:GetFocusedTextBox()
-                end
+                return IsMomentarilyActive()
 
             else
                 return KeyPicker.Toggled
             end
         end
 
-        function KeyPicker:SetKeybindFrameVisibility(Policy)
-            if Policy == nil then
-                Policy = "Always"
-            end
-
-            if Policy ~= "Always" and Policy ~= "Active" and Policy ~= "Hidden" then
-                error(string.format("SetKeybindFrameVisibility (%s): 只接受 \"Always\"、\"Active\"、\"Hidden\"。", tostring(Idx)), 2)
-            end
-
-            KeyPicker.KeybindFrameVisibility = Policy
+        function KeyPicker:SetShowInKeybindFrame(bool)
+            KeyPicker.ShowInKeybindFrame = bool ~= false
             KeyPicker:Update()
+        end
+
+        --// 旧接口垫片：老脚本里的 "Hidden" 转成 ShowInKeybindFrame = false，
+        --// "Always" / "Active" 两个旧策略已删除，一律按新模式自动显隐（不再报错）\\--
+        function KeyPicker:SetKeybindFrameVisibility(Policy)
+            KeyPicker:SetShowInKeybindFrame(Policy ~= "Hidden")
         end
 
         function KeyPicker:SetValue(Data, SkipCallback)
@@ -1999,14 +2067,14 @@ do
             BackgroundColor3 = ColorPicker.Value;
             BorderColor3 = Library:GetDarkerColor(ColorPicker.Value);
             BorderMode = Enum.BorderMode.Inset;
-            Size = UDim2.new(0, 28, 0, 15);
+            Size = UDim2.new(0, 24, 0, 14);
             ZIndex = 6;
             Parent = ToggleLabel;
         })
 
         Library:Create("ImageLabel", {
             BorderSizePixel = 0;
-            Size = UDim2.new(0, 27, 0, 13);
+            Size = UDim2.new(0, 23, 0, 12);
             ZIndex = 5;
             Image = CustomImageManager.GetAsset("Checker");
             Visible = not not Info.Transparency;
@@ -2024,9 +2092,51 @@ do
             Parent = ScreenGui,
         })
 
-        DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
-            PickerFrameOuter.Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18)
-        end)
+        --// 取色器定位：优先贴菜单边框外侧，放不下再走内侧，最后才回退到色块下方 \\--
+        local function UpdatePickerPosition()
+            local Width = PickerFrameOuter.AbsoluteSize.X
+            local Height = PickerFrameOuter.AbsoluteSize.Y
+
+            if Width <= 0 then Width = 124 end
+            if Height <= 0 then Height = Info.Transparency and 293 or 275 end
+
+            local ScreenSize = Library.ScreenGui.AbsoluteSize
+            local Holder = Library.Window and Library.Window.Holder
+            local Gap = 10
+            local X, Y
+
+            if Holder and Holder.Visible then
+                local HolderPos, HolderSize = Holder.AbsolutePosition, Holder.AbsoluteSize
+
+                if HolderPos.X + HolderSize.X + Gap + Width <= ScreenSize.X then
+                    X = HolderPos.X + HolderSize.X + Gap
+                elseif HolderPos.X - Gap - Width >= 0 then
+                    X = HolderPos.X - Gap - Width
+                else
+                    X = DisplayFrame.AbsolutePosition.X
+                end
+
+                Y = DisplayFrame.AbsolutePosition.Y - 24
+            else
+                X = DisplayFrame.AbsolutePosition.X
+                Y = DisplayFrame.AbsolutePosition.Y + 18
+            end
+
+            PickerFrameOuter.Position = UDim2.fromOffset(
+                math.clamp(X, 0, math.max(0, ScreenSize.X - Width)),
+                math.clamp(Y, 0, math.max(0, ScreenSize.Y - Height))
+            )
+        end
+
+        DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(UpdatePickerPosition)
+
+        if Library.Window and Library.Window.Holder then
+            Library.Window.Holder:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+                if PickerFrameOuter.Visible then
+                    UpdatePickerPosition()
+                end
+            end)
+        end
 
         local PickerFrameInner = Library:Create("Frame", {
             BackgroundColor3 = Library.BackgroundColor;
@@ -2080,7 +2190,7 @@ do
             Parent = SatVibMap;
         })
 
-        Library:Create("ImageLabel", {
+        local CursorInner = Library:Create("ImageLabel", {
             Size = UDim2.new(0, CursorOuter.Size.X.Offset - 2, 0, CursorOuter.Size.Y.Offset - 2);
             Position = UDim2.new(0, 1, 0, 1);
             BackgroundTransparency = 1;
@@ -2471,51 +2581,49 @@ do
             ColorPicker:Display()
         end)
 
-        SatVibMap.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
-                if Library.IsMobile then Library.CanDrag = false end
-                while Input.UserInputState ~= Enum.UserInputState.End do
-                    local MinX = SatVibMap.AbsolutePosition.X
-                    local MaxX = MinX + SatVibMap.AbsoluteSize.X
-                    local MouseX = math.clamp(Mouse.X, MinX, MaxX)
+        --// 统一拖拽：按下后每帧按指针位置取样，拖出控件也继续跟手；游标本身也参与，避免点到游标点不动 \\--
+        local function TrackDrag(Targets, OnMove)
+            for _, Target in next, Targets do
+                Target.InputBegan:Connect(function(Input)
+                    if Input.UserInputType ~= Enum.UserInputType.MouseButton1 and Input.UserInputType ~= Enum.UserInputType.Touch then
+                        return
+                    end
 
-                    local MinY = SatVibMap.AbsolutePosition.Y
-                    local MaxY = MinY + SatVibMap.AbsoluteSize.Y
-                    local MouseY = math.clamp(Mouse.Y, MinY, MaxY)
+                    if Library.IsMobile then Library.CanDrag = false end
 
-                    ColorPicker.Sat = (MouseX - MinX) / (MaxX - MinX)
-                    ColorPicker.Vib = 1 - ((MouseY - MinY) / (MaxY - MinY))
-                    ColorPicker:Display()
+                    OnMove()
 
-                    RunCallback()
+                    while Input.UserInputState ~= Enum.UserInputState.End do
+                        OnMove()
+                        RunService.RenderStepped:Wait()
+                    end
 
-                    RunService.RenderStepped:Wait()
-                end
-
-                if Library.IsMobile then Library.CanDrag = true end
-                Library:AttemptSave()
+                    if Library.IsMobile then Library.CanDrag = true end
+                    Library:AttemptSave()
+                end)
             end
+        end
+
+        TrackDrag({ SatVibMapOuter, SatVibMap, SatVibMapInner, CursorOuter, CursorInner }, function()
+            local MinX, MinY = SatVibMap.AbsolutePosition.X, SatVibMap.AbsolutePosition.Y
+            local MaxX = MinX + SatVibMap.AbsoluteSize.X
+            local MaxY = MinY + SatVibMap.AbsoluteSize.Y
+
+            ColorPicker.Sat = (math.clamp(Mouse.X, MinX, MaxX) - MinX) / math.max(1, MaxX - MinX)
+            ColorPicker.Vib = 1 - ((math.clamp(Mouse.Y, MinY, MaxY) - MinY) / math.max(1, MaxY - MinY))
+            ColorPicker:Display()
+
+            RunCallback()
         end)
 
-        HueSelectorInner.InputBegan:Connect(function(Input)
-            if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
-                if Library.IsMobile then Library.CanDrag = false end
-                while Input.UserInputState ~= Enum.UserInputState.End do
-                    local MinY = HueSelectorInner.AbsolutePosition.Y
-                    local MaxY = MinY + HueSelectorInner.AbsoluteSize.Y
-                    local MouseY = math.clamp(Mouse.Y, MinY, MaxY)
+        TrackDrag({ HueSelectorOuter, HueSelectorInner, HueCursor }, function()
+            local MinY = HueSelectorInner.AbsolutePosition.Y
+            local MaxY = MinY + HueSelectorInner.AbsoluteSize.Y
 
-                    ColorPicker.Hue = ((MouseY - MinY) / (MaxY - MinY))
-                    ColorPicker:Display()
+            ColorPicker.Hue = (math.clamp(Mouse.Y, MinY, MaxY) - MinY) / math.max(1, MaxY - MinY)
+            ColorPicker:Display()
 
-                    RunCallback()
-
-                    RunService.RenderStepped:Wait()
-                end
-
-                if Library.IsMobile then Library.CanDrag = true end
-                Library:AttemptSave()
-            end
+            RunCallback()
         end)
 
         DisplayFrame.InputBegan:Connect(function(Input)
@@ -4274,50 +4382,78 @@ do
             Parent = Container;
         })
 
-        --// 右上角自定义数值输入框（Info.AllowInput = false 可关闭；Compact 滑块不启用）\\--
+        --// 右上角数值输入：无底色无边框，右对齐贴着滑块末端，靠 1px 下划线提示"这里能改" \\--
         local SliderInput
-        if not Info.Compact and Info.AllowInput ~= false then
-            local InputOffset = 50 * DPIScale
+        local SliderInputLine
+        local InputHovering = false
+        local RefreshInputLook
 
+        if not Info.Compact and Info.AllowInput ~= false then
             if SliderText then
-                SliderText.Size = UDim2.new(1, -InputOffset, 0, 10)
+                SliderText.Size = UDim2.new(1, -52 * DPIScale, 0, 10)
                 SliderText.TextWrapped = false
                 SliderText.TextTruncate = Enum.TextTruncate.AtEnd
             end
 
             SliderInput = Library:Create("TextBox", {
                 AnchorPoint = Vector2.new(1, 0);
-                Position = if SliderText then UDim2.new(1, 50, 0, -1) else UDim2.new(1, 0, 0, -16);
-                Size = UDim2.new(0, 48, 0, 14);
-                BackgroundColor3 = Library.MainColor;
-                BorderColor3 = Library.OutlineColor;
-                BorderMode = Enum.BorderMode.Inset;
+                Position = UDim2.new(1, 0, 0, -16);
+                Size = UDim2.new(0, 46, 0, 14);
+                BackgroundTransparency = 1;
+                BorderSizePixel = 0;
                 Font = Library.Font;
                 Text = "";
                 PlaceholderText = "输入";
-                PlaceholderColor3 = Color3.fromRGB(150, 150, 150);
-                TextColor3 = Library.FontColor;
-                TextSize = 12;
+                PlaceholderColor3 = Color3.fromRGB(120, 120, 120);
+                TextColor3 = Color3.fromRGB(190, 190, 190);
+                TextSize = 13;
                 TextStrokeTransparency = 1;
                 ClearTextOnFocus = false;
-                TextXAlignment = Enum.TextXAlignment.Center;
+                TextXAlignment = Enum.TextXAlignment.Right;
+                TextTruncate = Enum.TextTruncate.AtEnd;
                 ZIndex = 10;
-                Parent = SliderText or SliderOuter;
+                Parent = SliderOuter;
             })
 
-            Library:AddToRegistry(SliderInput, {
-                BackgroundColor3 = "MainColor";
-                BorderColor3 = "OutlineColor";
-                TextColor3 = "FontColor";
+            SliderInputLine = Library:Create("Frame", {
+                AnchorPoint = Vector2.new(1, 0);
+                Position = UDim2.new(1, 0, 0, -2);
+                Size = UDim2.new(0, 46, 0, 1);
+                BackgroundColor3 = Library.OutlineColor;
+                BorderSizePixel = 0;
+                ZIndex = 10;
+                Parent = SliderOuter;
             })
 
-            Library:OnHighlight(SliderInput, SliderInput,
-                { BorderColor3 = "AccentColor" },
-                { BorderColor3 = "OutlineColor" },
-                function()
-                    return not Slider.Disabled
-                end
-            )
+            --// 三种状态：常态灰字+描边色细线；悬停强调色；聚焦强调色 + 极淡底色 \\--
+            RefreshInputLook = function()
+                local Active = SliderInput:IsFocused() or InputHovering
+
+                SliderInput.BackgroundTransparency = if SliderInput:IsFocused() then 0.88 else 1
+                SliderInput.BackgroundColor3 = Library.AccentColor
+
+                SliderInput.TextColor3 = if Slider.Disabled then Library.DisabledAccentColor
+                    elseif Active then Library.AccentColor
+                    else Color3.fromRGB(190, 190, 190)
+
+                SliderInputLine.BackgroundColor3 = if Slider.Disabled then Library.DisabledOutlineColor
+                    elseif Active then Library.AccentColor
+                    else Library.OutlineColor
+
+                SliderInput.TextEditable = not Slider.Disabled
+            end
+
+            SliderInput.MouseEnter:Connect(function()
+                InputHovering = true
+                RefreshInputLook()
+            end)
+
+            SliderInput.MouseLeave:Connect(function()
+                InputHovering = false
+                RefreshInputLook()
+            end)
+
+            SliderInput.Focused:Connect(RefreshInputLook)
         end
 
         SliderOuter:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
@@ -4396,9 +4532,8 @@ do
             end
             DisplayLabel.TextColor3 = Slider.Disabled and Library.DisabledAccentColor or Color3.new(1, 1, 1)
 
-            if SliderInput then
-                SliderInput.TextColor3 = Slider.Disabled and Library.DisabledAccentColor or Color3.new(1, 1, 1)
-                SliderInput.TextEditable = not Slider.Disabled
+            if RefreshInputLook then
+                RefreshInputLook()
             end
 
             HideBorderRight.BackgroundColor3 = Slider.Disabled and Library.DisabledAccentColor or Library.AccentColor
@@ -4505,6 +4640,7 @@ do
             SliderInput.FocusLost:Connect(function()
                 if Slider.Disabled then
                     SliderInput.Text = tostring(Slider.Value)
+                    RefreshInputLook()
                     return
                 end
 
@@ -4516,6 +4652,7 @@ do
                 end
 
                 SliderInput.Text = tostring(Slider.Value)
+                RefreshInputLook()
             end)
         end
 
@@ -6187,6 +6324,8 @@ do
         BorderColor3 = Library.OutlineColor;
         BorderMode = Enum.BorderMode.Inset;
         Size = UDim2.new(1, 0, 1, 0);
+        --// 兜底：任何情况下内容都不许画到面板边框外面 \\--
+        ClipsDescendants = true;
         ZIndex = 101;
         Parent = KeybindOuter;
     })
@@ -6235,6 +6374,7 @@ do
 
     Library:Create("UIPadding", {
         PaddingLeft = UDim.new(0, 5),
+        PaddingRight = UDim.new(0, 5),
         Parent = KeybindContainer,
     })
 
