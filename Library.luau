@@ -705,7 +705,7 @@ function Library:MakeDraggableUsingParent(Instance, Parent, Cutoff, IsMainWindow
     end
 end
 
-function Library:MakeResizable(Instance, MinSize)
+function Library:MakeResizable(Instance, MinSize, MaxSize, OnResize, ResizerZIndex)
     if Library.IsMobile then
         return
     end
@@ -716,6 +716,7 @@ function Library:MakeResizable(Instance, MinSize)
     local ResizerImage_HoverTransparency = 0.5
 
     local Resizer = Library:Create("Frame", {
+        Name = "Resizer";
         SizeConstraint = Enum.SizeConstraint.RelativeXX;
         BackgroundColor3 = Color3.new(0, 0, 0);
         BackgroundTransparency = 1;
@@ -724,7 +725,7 @@ function Library:MakeResizable(Instance, MinSize)
         Position = UDim2.new(1, -30, 1, -30);
         Visible = true;
         ClipsDescendants = true;
-        ZIndex = 1;
+        ZIndex = ResizerZIndex or 1;
         Parent = Instance;--Library.ScreenGui;
     })
 
@@ -734,7 +735,7 @@ function Library:MakeResizable(Instance, MinSize)
         BorderSizePixel = 0;
         Size = UDim2.new(2, 0, 2, 0);
         Position = UDim2.new(1, -30, 1, -30);
-        ZIndex = 2;
+        ZIndex = (ResizerZIndex or 1) + 1;
         Parent = Resizer;
     })
 
@@ -776,8 +777,16 @@ function Library:MakeResizable(Instance, MinSize)
     ResizerImage.MouseMoved:Connect(function()
         if OffsetPos then		
             local MousePos = Vector2.new(Mouse.X - OffsetPos.X, Mouse.Y - OffsetPos.Y)
-            local FinalSize = Vector2.new(math.clamp(MousePos.X - Instance.AbsolutePosition.X, MinSize.X, math.huge), math.clamp(MousePos.Y - Instance.AbsolutePosition.Y, MinSize.Y, math.huge))
+            local FinalSize = Vector2.new(
+                math.clamp(MousePos.X - Instance.AbsolutePosition.X, MinSize.X, MaxSize and MaxSize.X or math.huge),
+                math.clamp(MousePos.Y - Instance.AbsolutePosition.Y, MinSize.Y, MaxSize and MaxSize.Y or math.huge)
+            )
+
             Instance.Size = UDim2.fromOffset(FinalSize.X, FinalSize.Y)
+
+            if OnResize then
+                OnResize(FinalSize)
+            end
         end
     end)
 
@@ -1200,6 +1209,14 @@ do
             Callback = Info.Callback or function(Value) end;
             ChangedCallback = Info.ChangedCallback or function(New) end;
             SyncToggleState = Info.SyncToggleState or false;
+
+            --// 按键绑定面板显示策略：
+            --//   "Always"（默认）始终常驻；
+            --//   "Active" 仅在该按键处于激活状态时出现（按住类按键 = 按下期间，切换类 = 打开期间）；
+            --//   "Hidden" 从不显示。
+            KeybindFrameVisibility = if Info.ShowInKeybindFrame == false then "Hidden"
+                elseif Info.KeybindFrameVisibility == "Active" or Info.KeybindFrameVisibility == "Hidden" then Info.KeybindFrameVisibility
+                else "Always";
         }
 
         if KeyPicker.Mode == "Press" then
@@ -1636,6 +1653,14 @@ do
             local State = KeyPicker:GetState()
             local ShowToggle = Library.ShowToggleFrameInKeybinds and KeyPicker.Mode == "Toggle"
 
+            --// 按策略决定该条目是否出现在按键绑定面板里 \\--
+            local FramePolicy = KeyPicker.KeybindFrameVisibility or "Always"
+            local FrameVisible = FramePolicy ~= "Hidden"
+
+            if FramePolicy == "Active" then
+                FrameVisible = State and KeyPicker.Value ~= "None"
+            end
+
             if KeyPicker.SyncToggleState and ParentObj.Value ~= State then
                 ParentObj:SetValue(State)
             end
@@ -1643,7 +1668,7 @@ do
             if KeybindsToggle.Loaded then
                 KeybindsToggle:SetNormal(not ShowToggle)
 
-                KeybindsToggle:SetVisibility(true)
+                KeybindsToggle:SetVisibility(FrameVisible)
                 KeybindsToggle:SetText(string.format("[%s] %s (%s)", tostring(KeyPicker.DisplayValue), Info.Text, ModeDisplay[KeyPicker.Mode] or KeyPicker.Mode))
                 KeybindsToggle:Display(State)
             end
@@ -1664,7 +1689,24 @@ do
                 end
             end
 
-            Library.KeybindFrame.Size = UDim2.new(0, math.max(XSize + 10, 220), 0, (YSize + 23 + 6) * DPIScale)
+            local AutoWidth = math.max(XSize + 10, 220)
+            local AutoHeight = (YSize + 23 + 6) * DPIScale
+
+            if Library.KeybindFrameManual then
+                --// 用户手动缩放过后，只保证不小于内容所需尺寸，不再强制回写自动尺寸 \\--
+                local MinW = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.X) or 0
+                local MinH = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.Y) or 0
+                local MaxW = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.X) or math.huge
+                local MaxH = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.Y) or math.huge
+
+                Library.KeybindFrame.Size = UDim2.fromOffset(
+                    math.clamp(Library.KeybindFrame.Size.X.Offset, math.min(math.max(AutoWidth, MinW), MaxW), MaxW),
+                    math.clamp(Library.KeybindFrame.Size.Y.Offset, math.min(math.max(AutoHeight, MinH), MaxH), MaxH)
+                )
+            else
+                Library.KeybindFrame.Size = UDim2.fromOffset(AutoWidth, AutoHeight)
+            end
+
             UpdateMenuOuterPos()
         end
 
@@ -1691,6 +1733,19 @@ do
             else
                 return KeyPicker.Toggled
             end
+        end
+
+        function KeyPicker:SetKeybindFrameVisibility(Policy)
+            if Policy == nil then
+                Policy = "Always"
+            end
+
+            if Policy ~= "Always" and Policy ~= "Active" and Policy ~= "Hidden" then
+                error(string.format("SetKeybindFrameVisibility (%s): 只接受 \"Always\"、\"Active\"、\"Hidden\"。", tostring(Idx)), 2)
+            end
+
+            KeyPicker.KeybindFrameVisibility = Policy
+            KeyPicker:Update()
         end
 
         function KeyPicker:SetValue(Data, SkipCallback)
@@ -1963,7 +2018,7 @@ do
             BackgroundColor3 = Color3.new(1, 1, 1);
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18),
-            Size = UDim2.fromOffset(230, Info.Transparency and 271 or 253);
+            Size = UDim2.fromOffset(124, Info.Transparency and 293 or 275);
             Visible = false;
             ZIndex = 15;
             Parent = ScreenGui,
@@ -1993,7 +2048,7 @@ do
         local SatVibMapOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.new(0, 4, 0, 25);
-            Size = UDim2.new(0, 200, 0, 200);
+            Size = UDim2.new(0, 88, 0, 200);
             ZIndex = 17;
             Parent = PickerFrameInner;
         })
@@ -2036,7 +2091,7 @@ do
 
         local HueSelectorOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
-            Position = UDim2.new(0, 208, 0, 25);
+            Position = UDim2.new(0, 100, 0, 25);
             Size = UDim2.new(0, 15, 0, 200);
             ZIndex = 17;
             Parent = PickerFrameInner;
@@ -2062,7 +2117,7 @@ do
         local HueBoxOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.fromOffset(4, 228),
-            Size = UDim2.new(0.5, -6, 0, 20),
+            Size = UDim2.new(1, -8, 0, 20),
             ZIndex = 18,
             Parent = PickerFrameInner;
         })
@@ -2104,8 +2159,8 @@ do
         Library:ApplyTextStroke(HueBox)
 
         local RgbBoxBase = Library:Create(HueBoxOuter:Clone(), {
-            Position = UDim2.new(0.5, 2, 0, 228),
-            Size = UDim2.new(0.5, -6, 0, 20),
+            Position = UDim2.new(0, 4, 0, 251),
+            Size = UDim2.new(1, -8, 0, 20),
             Parent = PickerFrameInner
         })
 
@@ -2120,7 +2175,7 @@ do
         if Info.Transparency then 
             TransparencyBoxOuter = Library:Create("Frame", {
                 BorderColor3 = Color3.new(0, 0, 0);
-                Position = UDim2.fromOffset(4, 251);
+                Position = UDim2.fromOffset(4, 274);
                 Size = UDim2.new(1, -8, 0, 15);
                 ZIndex = 19;
                 Parent = PickerFrameInner;
@@ -4219,6 +4274,52 @@ do
             Parent = Container;
         })
 
+        --// 右上角自定义数值输入框（Info.AllowInput = false 可关闭；Compact 滑块不启用）\\--
+        local SliderInput
+        if not Info.Compact and Info.AllowInput ~= false then
+            local InputOffset = 50 * DPIScale
+
+            if SliderText then
+                SliderText.Size = UDim2.new(1, -InputOffset, 0, 10)
+                SliderText.TextWrapped = false
+                SliderText.TextTruncate = Enum.TextTruncate.AtEnd
+            end
+
+            SliderInput = Library:Create("TextBox", {
+                AnchorPoint = Vector2.new(1, 0);
+                Position = if SliderText then UDim2.new(1, 50, 0, -1) else UDim2.new(1, 0, 0, -16);
+                Size = UDim2.new(0, 48, 0, 14);
+                BackgroundColor3 = Library.MainColor;
+                BorderColor3 = Library.OutlineColor;
+                BorderMode = Enum.BorderMode.Inset;
+                Font = Library.Font;
+                Text = "";
+                PlaceholderText = "输入";
+                PlaceholderColor3 = Color3.fromRGB(150, 150, 150);
+                TextColor3 = Library.FontColor;
+                TextSize = 12;
+                TextStrokeTransparency = 1;
+                ClearTextOnFocus = false;
+                TextXAlignment = Enum.TextXAlignment.Center;
+                ZIndex = 10;
+                Parent = SliderText or SliderOuter;
+            })
+
+            Library:AddToRegistry(SliderInput, {
+                BackgroundColor3 = "MainColor";
+                BorderColor3 = "OutlineColor";
+                TextColor3 = "FontColor";
+            })
+
+            Library:OnHighlight(SliderInput, SliderInput,
+                { BorderColor3 = "AccentColor" },
+                { BorderColor3 = "OutlineColor" },
+                function()
+                    return not Slider.Disabled
+                end
+            )
+        end
+
         SliderOuter:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
             Slider.MaxSize = SliderOuter.AbsoluteSize.X - 2
         end)
@@ -4295,6 +4396,11 @@ do
             end
             DisplayLabel.TextColor3 = Slider.Disabled and Library.DisabledAccentColor or Color3.new(1, 1, 1)
 
+            if SliderInput then
+                SliderInput.TextColor3 = Slider.Disabled and Library.DisabledAccentColor or Color3.new(1, 1, 1)
+                SliderInput.TextEditable = not Slider.Disabled
+            end
+
             HideBorderRight.BackgroundColor3 = Slider.Disabled and Library.DisabledAccentColor or Library.AccentColor
 
             Fill.BackgroundColor3 = Slider.Disabled and Library.DisabledAccentColor or Library.AccentColor
@@ -4312,10 +4418,11 @@ do
                 CustomDisplayText = Info.FormatDisplayValue(Slider, Slider.Value)
             end
 
+            local FormattedValue = (Slider.Value == 0 or Slider.Value == -0) and "0" or tostring(Slider.Value)
+
             if CustomDisplayText then
                 DisplayLabel.Text = tostring(CustomDisplayText)
             else
-                local FormattedValue = (Slider.Value == 0 or Slider.Value == -0) and "0" or tostring(Slider.Value)
                 if Info.Compact then
                     DisplayLabel.Text = string.format("%s: %s%s%s", Slider.Text, Slider.Prefix, FormattedValue, Slider.Suffix)
 
@@ -4333,6 +4440,10 @@ do
             Fill.Size = UDim2.new(X, 0, 1, 0)
 
             HideBorderRight.Visible = not (X == 1 or X == 0)
+
+            if SliderInput and not SliderInput:IsFocused() then
+                SliderInput.Text = FormattedValue
+            end
         end
 
         function Slider:OnChanged(Func)
@@ -4387,6 +4498,25 @@ do
                 Library:SafeCallback(Slider.Callback, Slider.Value)
                 Library:SafeCallback(Slider.Changed, Slider.Value)
             end
+        end
+
+        --// 输入框提交：回车 / 失焦时解析、夹紧到 [Min, Max] 并触发回调 \\--
+        if SliderInput then
+            SliderInput.FocusLost:Connect(function()
+                if Slider.Disabled then
+                    SliderInput.Text = tostring(Slider.Value)
+                    return
+                end
+
+                local Num = tonumber((string.gsub(SliderInput.Text, "[^%d%.%-%+eE]", "")))
+
+                if Num then
+                    Slider:SetValue(Num)
+                    Library:AttemptSave()
+                end
+
+                SliderInput.Text = tostring(Slider.Value)
+            end)
         end
 
         function Slider:SetVisible(Visibility)
@@ -6111,6 +6241,15 @@ do
     Library.KeybindFrame = KeybindOuter
     Library.KeybindContainer = KeybindContainer
     Library:MakeDraggable(KeybindOuter)
+
+    --// 缩放范围：宽度 200~420、高度 44~420，避免把面板拖成一条线或盖满屏幕 \\--
+    Library.KeybindFrameMinSize = Vector2.new(200, 44)
+    Library.KeybindFrameMaxSize = Vector2.new(420, 420)
+    Library.KeybindFrameManual = false
+
+    Library:MakeResizable(KeybindOuter, Library.KeybindFrameMinSize, Library.KeybindFrameMaxSize, function()
+        Library.KeybindFrameManual = true
+    end, 300)
 end
 
 --// Watermark \\--
@@ -8034,20 +8173,37 @@ do
                 BackgroundColor3 = "AccentColor";
             })
 
+            --// 分组标题：字号明显大于控件文本，并用一条分隔线拉出层级 \\--
+            local GroupboxTitleHeight = 28
+
             Library:CreateLabel({
-                Size = UDim2.new(1, 0, 0, 18);
-                Position = UDim2.new(0, 4, 0, 2);
-                TextSize = 14;
+                Size = UDim2.new(1, -8, 0, 22);
+                Position = UDim2.new(0, 6, 0, 3);
+                TextSize = 17;
                 Text = Info.Name;
                 TextXAlignment = Enum.TextXAlignment.Left;
+                TextYAlignment = Enum.TextYAlignment.Center;
                 ZIndex = 5;
                 Parent = BoxInner;
             })
 
+            local TitleSeparator = Library:Create("Frame", {
+                BackgroundColor3 = Library.OutlineColor;
+                BorderSizePixel = 0;
+                Position = UDim2.new(0, 4, 0, 24);
+                Size = UDim2.new(1, -8, 0, 1);
+                ZIndex = 5;
+                Parent = BoxInner;
+            })
+
+            Library:AddToRegistry(TitleSeparator, {
+                BackgroundColor3 = "OutlineColor";
+            })
+
             local Container = Library:Create("Frame", {
                 BackgroundTransparency = 1;
-                Position = UDim2.new(0, 4, 0, 20);
-                Size = UDim2.new(1, -4, 1, -20);
+                Position = UDim2.new(0, 4, 0, 28);
+                Size = UDim2.new(1, -8, 1, -28);
                 ZIndex = 1;
                 Parent = BoxInner;
             })
@@ -8067,7 +8223,7 @@ do
                     end
                 end
 
-                BoxOuter.Size = UDim2.new(1, 0, 0, (20 * DPIScale + Size) + 2 + 2)
+                BoxOuter.Size = UDim2.new(1, 0, 0, (GroupboxTitleHeight * DPIScale + Size) + 2 + 2)
             end
 
             Groupbox.Container = Container
