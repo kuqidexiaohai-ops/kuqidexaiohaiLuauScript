@@ -2063,23 +2063,23 @@ do
 
         ColorPicker:SetHSVFromRGB(ColorPicker.Value)
 
-        --// 取色器内部布局常量：底部一摞 = 十六进制 20 + 间距 3 + RGB 20（有透明度时再 + 3 + 15）
-        --// 全部改成相对量，面板被拉伸时色板跟着一起长，不靠任何"绝对像素"写死 \\--
-        local PickerFooterHeight = 43 + (if Info.Transparency then 18 else 0)
-        local PickerMiddleOffset = 25 + PickerFooterHeight + 7
+        --// 底栏改成"贴底锚定"：十六进制 / RGB 这一行距底边固定，透明度条再往下让一条
+        --// 这样默认尺寸下的像素位置与原版完全一致（253 高时行顶 = 228），拉大面板时色板长、底栏不动 \\--
+        local PickerRowBottomOffset = if Info.Transparency then 43 else 25 -- 底边 → 十六进制行顶部
+        local PickerMapBottomOffset = PickerRowBottomOffset + 28            -- 底边 → 色板底部（行高 20 + 间距 3 + 下边距 5）
 
         local DisplayFrame = Library:Create("Frame", {
             BackgroundColor3 = ColorPicker.Value;
             BorderColor3 = Library:GetDarkerColor(ColorPicker.Value);
             BorderMode = Enum.BorderMode.Inset;
-            Size = UDim2.new(0, 24, 0, 14);
+            Size = UDim2.new(0, 28, 0, 15);
             ZIndex = 6;
             Parent = ToggleLabel;
         })
 
         Library:Create("ImageLabel", {
             BorderSizePixel = 0;
-            Size = UDim2.new(0, 23, 0, 12);
+            Size = UDim2.new(0, 27, 0, 13);
             ZIndex = 5;
             Image = CustomImageManager.GetAsset("Checker");
             Visible = not not Info.Transparency;
@@ -2091,97 +2091,32 @@ do
             BackgroundColor3 = Color3.new(1, 1, 1);
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18),
-            Size = UDim2.fromOffset(124, Info.Transparency and 293 or 275);
+            Size = UDim2.fromOffset(230, Info.Transparency and 271 or 253);
             Visible = false;
             ZIndex = 15;
             Parent = ScreenGui,
         })
 
-        --// 拖过 / 拉过之后就不再自动吸附，位置交给用户；想回到自动吸附调 ResetPlacement() \\--
-        ColorPicker.ManualPlacement = false
-        local AutoPositionTarget
-        local PickerMinSize = Vector2.new(112, 200)
-        local PickerMaxSize = Vector2.new(300, 460)
-
-        --// 取色器定位：优先贴菜单边框外侧，放不下再走内侧，最后才回退到色块下方 \\--
-        local function UpdatePickerPosition()
-            if ColorPicker.ManualPlacement then
-                return
-            end
-
-            local Width = PickerFrameOuter.AbsoluteSize.X
-            local Height = PickerFrameOuter.AbsoluteSize.Y
-
-            if Width <= 0 then Width = 124 end
-            if Height <= 0 then Height = PickerFrameOuter.Size.Y.Offset > 0 and PickerFrameOuter.Size.Y.Offset or 275 end
-
-            local ScreenSize = Library.ScreenGui.AbsoluteSize
-            local Holder = Library.Window and Library.Window.Holder
-            local Gap = 10
-            local X, Y
-
-            if Holder and Holder.Visible then
-                local HolderPos, HolderSize = Holder.AbsolutePosition, Holder.AbsoluteSize
-
-                if HolderPos.X + HolderSize.X + Gap + Width <= ScreenSize.X then
-                    X = HolderPos.X + HolderSize.X + Gap
-                elseif HolderPos.X - Gap - Width >= 0 then
-                    X = HolderPos.X - Gap - Width
-                else
-                    X = DisplayFrame.AbsolutePosition.X
-                end
-
-                Y = DisplayFrame.AbsolutePosition.Y - 24
-            else
-                X = DisplayFrame.AbsolutePosition.X
-                Y = DisplayFrame.AbsolutePosition.Y + 18
-            end
-
-            local FinalX = math.clamp(X, 0, math.max(0, ScreenSize.X - Width))
-            local FinalY = math.clamp(Y, 0, math.max(0, ScreenSize.Y - Height))
-
-            AutoPositionTarget = Vector2.new(FinalX, FinalY)
-            PickerFrameOuter.Position = UDim2.fromOffset(FinalX, FinalY)
-        end
-
-        --// 位置被改动（拖拽）就锁成手动模式，别再被自动吸附拉回去。
-        --// 用"这次改动是不是我刚写进去的那个坐标"来判断，避免把自己写的那次误判成用户拖拽 \\--
-        PickerFrameOuter:GetPropertyChangedSignal("Position"):Connect(function()
-            local Pos = PickerFrameOuter.Position
-
-            if AutoPositionTarget
-                and math.abs(Pos.X.Offset - AutoPositionTarget.X) < 1
-                and math.abs(Pos.Y.Offset - AutoPositionTarget.Y) < 1 then
-
-                return
-            end
-
-            ColorPicker.ManualPlacement = true
+        --// 位置跟着色块走（原版行为）：色块动，弹窗就跟着动 \\--
+        DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+            PickerFrameOuter.Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18)
         end)
 
-        --// 只有标题栏那一条能拖，色板和输入框区域不参与，免得想取色反而拖走窗口 \\--
-        Library:MakeDraggable(PickerFrameOuter, 22)
+        --// 尺寸可拉：默认就是原版 230×253，右下角拖拽后由用户自己定
+        --// MinSize/MaxSize 与 Instance.Size 走同一套"实际像素"单位，避免 DPIScale ≠ 1 时第一次拖拽跳变 \\--
+        local PickerDefaultSize = Vector2.new(230 * DPIScale, (if Info.Transparency then 271 else 253) * DPIScale)
 
-        --// 右下角可拉伸：内部全是相对布局，拉大色板跟着长 \\--
-        Library:MakeResizable(PickerFrameOuter, PickerMinSize, PickerMaxSize, function()
-            ColorPicker.ManualPlacement = true
-        end, 300)
-
-        function ColorPicker:ResetPlacement()
-            ColorPicker.ManualPlacement = false
-            PickerFrameOuter.Size = UDim2.fromOffset(124, Info.Transparency and 293 or 275)
-            UpdatePickerPosition()
+        function ColorPicker:ResetSize()
+            PickerFrameOuter.Size = UDim2.fromOffset(PickerDefaultSize.X, PickerDefaultSize.Y)
         end
 
-        DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(UpdatePickerPosition)
-
-        if Library.Window and Library.Window.Holder then
-            Library.Window.Holder:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
-                if PickerFrameOuter.Visible then
-                    UpdatePickerPosition()
-                end
-            end)
-        end
+        Library:MakeResizable(
+            PickerFrameOuter,
+            PickerDefaultSize,
+            Vector2.new(420 * DPIScale, 480 * DPIScale),
+            function() end,
+            300
+        )
 
         local PickerFrameInner = Library:Create("Frame", {
             BackgroundColor3 = Library.BackgroundColor;
@@ -2203,7 +2138,7 @@ do
         local SatVibMapOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.new(0, 4, 0, 25);
-            Size = UDim2.new(1, -27, 1, -PickerMiddleOffset);
+            Size = UDim2.new(1, -27, 1, -PickerMapBottomOffset);
             ZIndex = 17;
             Parent = PickerFrameInner;
         })
@@ -2247,7 +2182,7 @@ do
         local HueSelectorOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.new(1, -19, 0, 25);
-            Size = UDim2.new(0, 15, 1, -PickerMiddleOffset);
+            Size = UDim2.new(0, 15, 1, -PickerMapBottomOffset);
             ZIndex = 17;
             Parent = PickerFrameInner;
         })
@@ -2271,8 +2206,8 @@ do
 
         local HueBoxOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
-            Position = UDim2.new(0, 4, 1, -(PickerFooterHeight + 4)),
-            Size = UDim2.new(1, -8, 0, 20),
+            Position = UDim2.new(0, 4, 1, -PickerRowBottomOffset),
+            Size = UDim2.new(0.5, -6, 0, 20),
             ZIndex = 18,
             Parent = PickerFrameInner;
         })
@@ -2314,8 +2249,8 @@ do
         Library:ApplyTextStroke(HueBox)
 
         local RgbBoxBase = Library:Create(HueBoxOuter:Clone(), {
-            Position = UDim2.new(0, 4, 1, -24),
-            Size = UDim2.new(1, -8, 0, 20),
+            Position = UDim2.new(0.5, 2, 1, -PickerRowBottomOffset),
+            Size = UDim2.new(0.5, -6, 0, 20),
             Parent = PickerFrameInner
         })
 
@@ -2330,7 +2265,7 @@ do
         if Info.Transparency then 
             TransparencyBoxOuter = Library:Create("Frame", {
                 BorderColor3 = Color3.new(0, 0, 0);
-                Position = UDim2.new(0, 4, 1, -19);
+                Position = UDim2.new(0, 4, 1, -20);
                 Size = UDim2.new(1, -8, 0, 15);
                 ZIndex = 19;
                 Parent = PickerFrameInner;
@@ -2511,9 +2446,9 @@ do
                 Library:Notify("已复制 RGB 到剪贴板！", 2)
             end)
 
-            --// 手动拖歪/拉变形之后，右键一键回到默认尺寸与自动吸附位置 \\--
-            ContextMenu:AddOption("重置位置与大小", function()
-                ColorPicker:ResetPlacement()
+            --// 拉变形之后，右键一键回到原版尺寸 \\--
+            ContextMenu:AddOption("重置大小", function()
+                ColorPicker:ResetSize()
                 ContextMenu:Hide()
             end)
         end
@@ -2586,7 +2521,9 @@ do
                 Library.OpenedFrames[Frame] = nil
             end
 
-            UpdatePickerPosition()
+            --// 打开时再对一次坐标：色块刚从折叠分组里展开/菜单刚被拖过时，
+            --// AbsolutePosition 的信号可能还没到，这里补一次保证落在色块下方 \\--
+            PickerFrameOuter.Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18)
 
             PickerFrameOuter.Visible = true
             Library.OpenedFrames[PickerFrameOuter] = true
@@ -4514,7 +4451,8 @@ do
             RefreshInputLook = function()
                 local Active = SliderInput:IsFocused() or InputHovering
 
-                SliderInput.BackgroundTransparency = if SliderInput:IsFocused() then 0.88 else 1
+                --// 只留下划线，输入框本体永远透明（聚焦时也不铺底色，避免出现长方形色块） \\--
+                SliderInput.BackgroundTransparency = 1
                 SliderInput.BackgroundColor3 = Library.AccentColor
 
                 SliderInput.TextColor3 = if Slider.Disabled then Library.DisabledAccentColor
