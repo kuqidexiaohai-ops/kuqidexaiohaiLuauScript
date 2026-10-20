@@ -653,6 +653,63 @@ SecretDepbox:SetupDependencies({
 	{ Options.DepboxDropdown, "ĉ"} -- 对于下拉框，它会自动检查指定的下拉值是否被选中
 })
 
+--// 按键绑定面板的显示策略（KeybindFrameVisibility）\\
+-- 面板本身可以拖动位置，右下角拖动可缩放：宽 200~420、高 44~420
+local KeybindGroup = Tabs.Main:AddRightGroupbox("按键显示策略")
+
+KeybindGroup:AddLabel("仅激活时出现在按键面板"):AddKeyPicker("KF_Active", {
+	Default = "F",
+	Mode = "Hold",
+	Text = "激活才显示",
+	KeybindFrameVisibility = "Active", -- 只在按住 / 激活期间出现在按键面板
+	Callback = function(Value)
+		print("[Active] 当前是否激活:", Value)
+	end,
+})
+
+KeybindGroup:AddLabel("常驻按键面板"):AddKeyPicker("KF_Always", {
+	Default = "G",
+	Mode = "Toggle",
+	Text = "始终显示",
+	KeybindFrameVisibility = "Always", -- 默认值，一直显示
+})
+
+KeybindGroup:AddLabel("从不进入按键面板"):AddKeyPicker("KF_Hidden", {
+	Default = "H",
+	Mode = "Toggle",
+	Text = "隐藏",
+	KeybindFrameVisibility = "Hidden", -- 等价于旧写法 NoUI = true
+})
+
+KeybindGroup:AddDivider()
+
+-- 运行时切换策略：Always / Active / Hidden
+KeybindGroup:AddButton({
+	Text = "把「激活才显示」切回常驻",
+	Func = function()
+		Options.KF_Active:SetKeybindFrameVisibility("Always")
+		Library:Notify("KF_Active 已改为常驻显示", 3)
+	end,
+})
+
+KeybindGroup:AddButton({
+	Text = "重置按键面板尺寸",
+	Func = function()
+		Library.KeybindFrameManual = false
+		Library.KeybindFrame.Size = UDim2.fromOffset(220, 40)
+	end,
+})
+
+KeybindGroup:AddSlider("DemoSliderInput", {
+	Text = "带输入框的滑块",
+	Default = 50,
+	Min = 0,
+	Max = 100,
+	Rounding = 0,
+	Suffix = "%",
+	-- AllowInput = false, -- 关掉右上角的数值输入框
+})
+
 -- 库函数
 -- 设置水印可见性
 Library:SetWatermarkVisibility(true)
