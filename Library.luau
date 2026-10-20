@@ -1716,22 +1716,22 @@ do
             end
 
             local MaxWidthCap = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.X) or math.huge
+            local MaxHeightCap = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.Y) or math.huge
+            local MinWidthCap = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.X) or 0
+            local MinHeightCap = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.Y) or 0
+
             local AutoWidth = math.min(math.max(XSize + 10, 220), MaxWidthCap)
 
             --// 这里不乘 DPIScale：行高是固定像素，一边乘一边不乘就会算出装不下内容的框
-            --// 26 = 标题 20 + 底部留白 4 + 边框 2 \\--
-            local AutoHeight = YSize + 26
+            --// 26 = 标题 20 + 底部留白 4 + 边框 2
+            --// 上限夹死：条目再多也不会把面板顶成一条通天柱，超出的部分靠滚动查看 \\--
+            local AutoHeight = math.clamp(YSize + 26, MinHeightCap, MaxHeightCap)
 
             if Library.KeybindFrameManual then
                 --// 用户手动缩放过后，只保证不小于内容所需尺寸，不再强制回写自动尺寸 \\--
-                local MinW = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.X) or 0
-                local MinH = (Library.KeybindFrameMinSize and Library.KeybindFrameMinSize.Y) or 0
-                local MaxW = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.X) or math.huge
-                local MaxH = (Library.KeybindFrameMaxSize and Library.KeybindFrameMaxSize.Y) or math.huge
-
                 Library.KeybindFrame.Size = UDim2.fromOffset(
-                    math.clamp(Library.KeybindFrame.Size.X.Offset, math.min(math.max(AutoWidth, MinW), MaxW), MaxW),
-                    math.clamp(Library.KeybindFrame.Size.Y.Offset, math.min(math.max(AutoHeight, MinH), MaxH), MaxH)
+                    math.clamp(Library.KeybindFrame.Size.X.Offset, AutoWidth, MaxWidthCap),
+                    math.clamp(Library.KeybindFrame.Size.Y.Offset, AutoHeight, MaxHeightCap)
                 )
             else
                 Library.KeybindFrame.Size = UDim2.fromOffset(AutoWidth, AutoHeight)
@@ -2063,6 +2063,11 @@ do
 
         ColorPicker:SetHSVFromRGB(ColorPicker.Value)
 
+        --// 取色器内部布局常量：底部一摞 = 十六进制 20 + 间距 3 + RGB 20（有透明度时再 + 3 + 15）
+        --// 全部改成相对量，面板被拉伸时色板跟着一起长，不靠任何"绝对像素"写死 \\--
+        local PickerFooterHeight = 43 + (if Info.Transparency then 18 else 0)
+        local PickerMiddleOffset = 25 + PickerFooterHeight + 7
+
         local DisplayFrame = Library:Create("Frame", {
             BackgroundColor3 = ColorPicker.Value;
             BorderColor3 = Library:GetDarkerColor(ColorPicker.Value);
@@ -2092,13 +2097,23 @@ do
             Parent = ScreenGui,
         })
 
+        --// 拖过 / 拉过之后就不再自动吸附，位置交给用户；想回到自动吸附调 ResetPlacement() \\--
+        ColorPicker.ManualPlacement = false
+        local AutoPositionTarget
+        local PickerMinSize = Vector2.new(112, 200)
+        local PickerMaxSize = Vector2.new(300, 460)
+
         --// 取色器定位：优先贴菜单边框外侧，放不下再走内侧，最后才回退到色块下方 \\--
         local function UpdatePickerPosition()
+            if ColorPicker.ManualPlacement then
+                return
+            end
+
             local Width = PickerFrameOuter.AbsoluteSize.X
             local Height = PickerFrameOuter.AbsoluteSize.Y
 
             if Width <= 0 then Width = 124 end
-            if Height <= 0 then Height = Info.Transparency and 293 or 275 end
+            if Height <= 0 then Height = PickerFrameOuter.Size.Y.Offset > 0 and PickerFrameOuter.Size.Y.Offset or 275 end
 
             local ScreenSize = Library.ScreenGui.AbsoluteSize
             local Holder = Library.Window and Library.Window.Holder
@@ -2122,10 +2137,40 @@ do
                 Y = DisplayFrame.AbsolutePosition.Y + 18
             end
 
-            PickerFrameOuter.Position = UDim2.fromOffset(
-                math.clamp(X, 0, math.max(0, ScreenSize.X - Width)),
-                math.clamp(Y, 0, math.max(0, ScreenSize.Y - Height))
-            )
+            local FinalX = math.clamp(X, 0, math.max(0, ScreenSize.X - Width))
+            local FinalY = math.clamp(Y, 0, math.max(0, ScreenSize.Y - Height))
+
+            AutoPositionTarget = Vector2.new(FinalX, FinalY)
+            PickerFrameOuter.Position = UDim2.fromOffset(FinalX, FinalY)
+        end
+
+        --// 位置被改动（拖拽）就锁成手动模式，别再被自动吸附拉回去。
+        --// 用"这次改动是不是我刚写进去的那个坐标"来判断，避免把自己写的那次误判成用户拖拽 \\--
+        PickerFrameOuter:GetPropertyChangedSignal("Position"):Connect(function()
+            local Pos = PickerFrameOuter.Position
+
+            if AutoPositionTarget
+                and math.abs(Pos.X.Offset - AutoPositionTarget.X) < 1
+                and math.abs(Pos.Y.Offset - AutoPositionTarget.Y) < 1 then
+
+                return
+            end
+
+            ColorPicker.ManualPlacement = true
+        end)
+
+        --// 只有标题栏那一条能拖，色板和输入框区域不参与，免得想取色反而拖走窗口 \\--
+        Library:MakeDraggable(PickerFrameOuter, 22)
+
+        --// 右下角可拉伸：内部全是相对布局，拉大色板跟着长 \\--
+        Library:MakeResizable(PickerFrameOuter, PickerMinSize, PickerMaxSize, function()
+            ColorPicker.ManualPlacement = true
+        end, 300)
+
+        function ColorPicker:ResetPlacement()
+            ColorPicker.ManualPlacement = false
+            PickerFrameOuter.Size = UDim2.fromOffset(124, Info.Transparency and 293 or 275)
+            UpdatePickerPosition()
         end
 
         DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(UpdatePickerPosition)
@@ -2158,7 +2203,7 @@ do
         local SatVibMapOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
             Position = UDim2.new(0, 4, 0, 25);
-            Size = UDim2.new(0, 88, 0, 200);
+            Size = UDim2.new(1, -27, 1, -PickerMiddleOffset);
             ZIndex = 17;
             Parent = PickerFrameInner;
         })
@@ -2201,8 +2246,8 @@ do
 
         local HueSelectorOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
-            Position = UDim2.new(0, 100, 0, 25);
-            Size = UDim2.new(0, 15, 0, 200);
+            Position = UDim2.new(1, -19, 0, 25);
+            Size = UDim2.new(0, 15, 1, -PickerMiddleOffset);
             ZIndex = 17;
             Parent = PickerFrameInner;
         })
@@ -2226,7 +2271,7 @@ do
 
         local HueBoxOuter = Library:Create("Frame", {
             BorderColor3 = Color3.new(0, 0, 0);
-            Position = UDim2.fromOffset(4, 228),
+            Position = UDim2.new(0, 4, 1, -(PickerFooterHeight + 4)),
             Size = UDim2.new(1, -8, 0, 20),
             ZIndex = 18,
             Parent = PickerFrameInner;
@@ -2269,7 +2314,7 @@ do
         Library:ApplyTextStroke(HueBox)
 
         local RgbBoxBase = Library:Create(HueBoxOuter:Clone(), {
-            Position = UDim2.new(0, 4, 0, 251),
+            Position = UDim2.new(0, 4, 1, -24),
             Size = UDim2.new(1, -8, 0, 20),
             Parent = PickerFrameInner
         })
@@ -2285,7 +2330,7 @@ do
         if Info.Transparency then 
             TransparencyBoxOuter = Library:Create("Frame", {
                 BorderColor3 = Color3.new(0, 0, 0);
-                Position = UDim2.fromOffset(4, 274);
+                Position = UDim2.new(0, 4, 1, -19);
                 Size = UDim2.new(1, -8, 0, 15);
                 ZIndex = 19;
                 Parent = PickerFrameInner;
@@ -2465,6 +2510,12 @@ do
                 pcall(setclipboard, table.concat({ math.floor(ColorPicker.Value.R * 255), math.floor(ColorPicker.Value.G * 255), math.floor(ColorPicker.Value.B * 255) }, ", "))
                 Library:Notify("已复制 RGB 到剪贴板！", 2)
             end)
+
+            --// 手动拖歪/拉变形之后，右键一键回到默认尺寸与自动吸附位置 \\--
+            ContextMenu:AddOption("重置位置与大小", function()
+                ColorPicker:ResetPlacement()
+                ContextMenu:Hide()
+            end)
         end
         ColorPicker.ContextMenu = ContextMenu
 
@@ -2520,12 +2571,22 @@ do
         end
 
         function ColorPicker:Show()
-            for Frame, Val in next, Library.OpenedFrames do
+            --// 先把要关的收集起来再关：边遍历边删表项会漏掉元素，
+            --// 漏掉的那个取色器就永远留在屏幕上跟后面打开的那个抢点击 \\--
+            local Stale = {}
+
+            for Frame in next, Library.OpenedFrames do
                 if Frame.Name == "Color" then
-                    Frame.Visible = false
-                    Library.OpenedFrames[Frame] = nil
+                    table.insert(Stale, Frame)
                 end
             end
+
+            for _, Frame in next, Stale do
+                Frame.Visible = false
+                Library.OpenedFrames[Frame] = nil
+            end
+
+            UpdatePickerPosition()
 
             PickerFrameOuter.Visible = true
             Library.OpenedFrames[PickerFrameOuter] = true
@@ -2673,10 +2734,12 @@ do
             end
 
             if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
-                local AbsPos, AbsSize = PickerFrameOuter.AbsolutePosition, PickerFrameOuter.AbsoluteSize
-
-                if Mouse.X < AbsPos.X or Mouse.X > AbsPos.X + AbsSize.X
-                    or Mouse.Y < (AbsPos.Y - 20 - 1) or Mouse.Y > AbsPos.Y + AbsSize.Y then
+                --// 判断"点在哪"改用命中测试：弹窗现在贴在菜单外侧，
+                --// 原来的绝对坐标比较会把"点自己色块把它打开"的那一次点击也算成点在外面，
+                --// 于是刚开就被自己关掉 —— 这就是连着放几个取色器、前两个怎么点都不弹的原因 \\--
+                if PickerFrameOuter.Visible
+                    and not Library:MouseIsOverFrame(PickerFrameOuter, Input)
+                    and not Library:MouseIsOverFrame(DisplayFrame, Input) then
 
                     ColorPicker:Hide()
                 end
@@ -4418,14 +4481,36 @@ do
             SliderInputLine = Library:Create("Frame", {
                 AnchorPoint = Vector2.new(1, 0);
                 Position = UDim2.new(1, 0, 0, -2);
-                Size = UDim2.new(0, 46, 0, 1);
+                Size = UDim2.new(0, 12, 0, 1);
                 BackgroundColor3 = Library.OutlineColor;
+                BackgroundTransparency = 0.35;
                 BorderSizePixel = 0;
                 ZIndex = 10;
                 Parent = SliderOuter;
             })
 
-            --// 三种状态：常态灰字+描边色细线；悬停强调色；聚焦强调色 + 极淡底色 \\--
+            --// 下划线只垫在数字底下：宽度跟着当前文本实时量，数字短线就短，
+            --// 不会再拖一条 46px 的长尾巴压住滑块 \\--
+            local LastMeasuredText
+
+            local UpdateInputLineWidth = function()
+                local Text = SliderInput.Text
+
+                if Text == nil or Text == "" then
+                    Text = SliderInput.PlaceholderText or ""
+                end
+
+                if Text == LastMeasuredText then
+                    return
+                end
+
+                LastMeasuredText = Text
+
+                local Bounds = TextService:GetTextSize(Text, SliderInput.TextSize, SliderInput.Font, Vector2.new(1000, 100))
+                SliderInputLine.Size = UDim2.new(0, math.clamp(Bounds.X + 3, 10, 46), 0, 1)
+            end
+
+            --// 三种状态：常态灰字 + 极淡细线；悬停强调色；聚焦强调色 + 极淡底色 \\--
             RefreshInputLook = function()
                 local Active = SliderInput:IsFocused() or InputHovering
 
@@ -4440,8 +4525,18 @@ do
                     elseif Active then Library.AccentColor
                     else Library.OutlineColor
 
+                --// 常态压到 0.35 透明度，只在悬停/聚焦时实心，平时不抢视线 \\--
+                SliderInputLine.BackgroundTransparency = if Slider.Disabled then 0.7
+                    elseif Active then 0
+                    else 0.35
+
                 SliderInput.TextEditable = not Slider.Disabled
+
+                UpdateInputLineWidth()
             end
+
+            SliderInput:GetPropertyChangedSignal("Text"):Connect(UpdateInputLineWidth)
+            UpdateInputLineWidth()
 
             SliderInput.MouseEnter:Connect(function()
                 InputHovering = true
@@ -6358,11 +6453,19 @@ do
     })
     Library:MakeDraggable(KeybindOuter)
 
-    local KeybindContainer = Library:Create("Frame", {
+    --// 条目多了以后面板装不下：这里改成可滚动容器，
+    --// 超出部分滚动查看，而不是被裁掉（吞掉）\\--
+    local KeybindContainer = Library:Create("ScrollingFrame", {
         BackgroundTransparency = 1;
         Size = UDim2.new(1, 0, 1, -20);
         Position = UDim2.new(0, 0, 0, 20);
         ZIndex = 1;
+        CanvasSize = UDim2.new(0, 0, 0, 0);
+        AutomaticCanvasSize = Enum.AutomaticSize.Y;
+        ScrollingDirection = Enum.ScrollingDirection.Y;
+        ScrollBarThickness = 3;
+        ScrollBarImageColor3 = Library.OutlineColor;
+        BorderSizePixel = 0;
         Parent = KeybindInner;
     })
 
