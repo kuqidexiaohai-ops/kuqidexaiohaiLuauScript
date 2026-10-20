@@ -7,7 +7,8 @@ local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.luau"))(
 local Options = Library.Options
 local Toggles = Library.Toggles
 
-Library.ShowToggleFrameInKeybinds = true -- 让开关类按键在按键界面里生效（即在 UI 中额外加一个开关）。适合手机用户（默认值 = true）
+-- ShowToggleFrameInKeybinds 已删除：按键面板显示什么，现在只看「模式 + 状态」
+-- 始终 = 常驻 / 切换 = 开了才有 / 按住 = 按下期间才有（见 KeyPicker:ShouldShowInKeybindFrame）
 Library.ShowCustomCursor = true -- 全局切换 Linoria 光标（默认值 = true）
 Library.NotifySide = "Left" -- 全局修改通知的显示侧（Left、Right）（默认值 = Left）
 
@@ -653,42 +654,44 @@ SecretDepbox:SetupDependencies({
 	{ Options.DepboxDropdown, "ĉ"} -- 对于下拉框，它会自动检查指定的下拉值是否被选中
 })
 
---// 按键绑定面板的显示策略（KeybindFrameVisibility）\\
--- 面板本身可以拖动位置，右下角拖动可缩放：宽 200~420、高 44~420
-local KeybindGroup = Tabs.Main:AddRightGroupbox("按键显示策略")
+--// 按键绑定面板的显示规则（不需要任何策略开关，模式就是规则）\\
+-- 面板本身可拖动位置，右下角拖动可缩放：宽 200~420、高 44~420，且永远不会小于内容所需尺寸
+local KeybindGroup = Tabs.Main:AddRightGroupbox("按键显示规则")
 
-KeybindGroup:AddLabel("仅激活时出现在按键面板"):AddKeyPicker("KF_Active", {
+KeybindGroup:AddLabel("「始终」：绑上就一直挂在面板里"):AddKeyPicker("KF_Always", {
 	Default = "F",
-	Mode = "Hold",
-	Text = "激活才显示",
-	KeybindFrameVisibility = "Active", -- 只在按住 / 激活期间出现在按键面板
-	Callback = function(Value)
-		print("[Active] 当前是否激活:", Value)
-	end,
+	Mode = "Always",
+	Text = "始终显示",
 })
 
-KeybindGroup:AddLabel("常驻按键面板"):AddKeyPicker("KF_Always", {
+KeybindGroup:AddLabel("「切换」：开了才在面板里，关了消失"):AddKeyPicker("KF_Toggle", {
 	Default = "G",
 	Mode = "Toggle",
-	Text = "始终显示",
-	KeybindFrameVisibility = "Always", -- 默认值，一直显示
+	Text = "开关型",
 })
 
-KeybindGroup:AddLabel("从不进入按键面板"):AddKeyPicker("KF_Hidden", {
+KeybindGroup:AddLabel("「按住」：只有按住这个键时才出现"):AddKeyPicker("KF_Hold", {
 	Default = "H",
+	Mode = "Hold",
+	Text = "按住型",
+})
+
+KeybindGroup:AddLabel("永不进面板（硬开关）"):AddKeyPicker("KF_Hidden", {
+	Default = "J",
 	Mode = "Toggle",
 	Text = "隐藏",
-	KeybindFrameVisibility = "Hidden", -- 等价于旧写法 NoUI = true
+	ShowInKeybindFrame = false, -- 唯一还留着的硬开关
 })
 
 KeybindGroup:AddDivider()
 
--- 运行时切换策略：Always / Active / Hidden
 KeybindGroup:AddButton({
-	Text = "把「激活才显示」切回常驻",
+	Text = "把「开关型」临时藏起来 / 放出来",
 	Func = function()
-		Options.KF_Active:SetKeybindFrameVisibility("Always")
-		Library:Notify("KF_Active 已改为常驻显示", 3)
+		local Picker = Options.KF_Toggle
+		local NewState = not Picker.ShowInKeybindFrame
+		Picker:SetShowInKeybindFrame(NewState)
+		Library:Notify("KF_Toggle 面板显示 = " .. tostring(NewState), 3)
 	end,
 })
 
@@ -696,7 +699,7 @@ KeybindGroup:AddButton({
 	Text = "重置按键面板尺寸",
 	Func = function()
 		Library.KeybindFrameManual = false
-		Library.KeybindFrame.Size = UDim2.fromOffset(220, 40)
+		Library.KeybindFrame.Size = UDim2.fromOffset(220, 26)
 	end,
 })
 
