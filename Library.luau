@@ -287,8 +287,6 @@ local Library = {
     Notify = nil;
     NotifySide = "Left";
     ShowCustomCursor = true;
-    -- ShowToggleFrameInKeybinds 已废弃：按键面板的显隐现在完全由「模式 + 状态」决定，
-    -- 见 KeyPicker:ShouldShowInKeybindFrame()
     NotifyOnError = false; -- true = Library:Notify for SafeCallback (still warns in the developer console)
 
     -- addons --
@@ -449,35 +447,99 @@ function Library:GetBetterColor(Color: Color3, Add: number): Color3
     )
 end
 
--- 去掉富文本标签，供搜索匹配 --
 local function StripRichText(Text: string): string
     return (tostring(Text):gsub("<[^>]->", ""))
 end
 
--- 登记控件进搜索索引，供顶栏搜索查找 / 跳转 --
-function Library:AddSearchEntry(Groupbox, Name, Type, Anchor)
-    if not Groupbox or not Anchor then return end
+local function NormalizeText(Text): string
+    return string.lower(tostring(Text or ""))
+end
+
+local function SplitSearchTokens(Query): { string }
+    local Tokens = {}
+
+    for Token in string.gmatch(NormalizeText(Query), "%S+") do
+        table.insert(Tokens, Token)
+    end
+
+    return Tokens
+end
+
+local function MatchesTokens(Haystack: string, Tokens: { string }): boolean
+    if #Tokens == 0 then
+        return false
+    end
+
+    for _, Token in ipairs(Tokens) do
+        if not string.find(Haystack, Token, 1, true) then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function BuildHaystack(...): string
+    local Parts = {}
+
+    for _, Value in ipairs({ ... }) do
+        local Text = NormalizeText(Value)
+
+        if Text ~= "" then
+            table.insert(Parts, Text)
+        end
+    end
+
+    return table.concat(Parts, "\n")
+end
+
+function Library:AddSearchNode(Entry)
+    local Tab = Entry.Tab
+    local Window = Entry.Window or (Tab and Tab.Window) or Library.Window
+
+    if not Window or not Window.SearchIndex then
+        return
+    end
+
+    Entry.Window = nil
+
+    table.insert(Window.SearchIndex, Entry)
+end
+
+function Library:AddSearchEntry(Groupbox, Name, Type, Anchor, Idx)
+    if not Groupbox or not Anchor then
+        return
+    end
 
     local Clean = StripRichText(Name)
-    if Clean == "" then return end
+
+    if Clean == "" then
+        return
+    end
 
     local Tab = Groupbox.Tab
-    local Window = Tab and Tab.Window
-    if not Window or not Window.SearchIndex then return end
+
+    if not Tab then
+        return
+    end
 
     local Sides = Tab:GetSides()
-    local Side = (Groupbox.Side == 1) and Sides.Left or Sides.Right
 
-    table.insert(Window.SearchIndex, {
+    Library:AddSearchNode({
+        Kind = "Element";
         Name = Clean;
-        Query = string.lower(Clean);
+        Query = NormalizeText(Clean);
+        Idx = if Idx ~= nil then tostring(Idx) else "";
         Type = Type or "Element";
+        Haystack = BuildHaystack(Clean, Idx, Type, Groupbox.Name);
         TabName = Tab.Name or "";
         GroupName = Groupbox.Name or "";
         Tab = Tab;
-        Side = Side;
+        Section = Groupbox.Section;
+        Side = (Groupbox.Side == 1) and Sides.Left or Sides.Right;
         Anchor = Anchor;
         SubShow = Groupbox.TabboxShow;
+        Groupbox = Groupbox;
     })
 end
 
@@ -1211,12 +1273,6 @@ do
             ChangedCallback = Info.ChangedCallback or function(New) end;
             SyncToggleState = Info.SyncToggleState or false;
 
-            --// 按键绑定面板显示规则（没有独立的显隐策略了，只看模式 + 状态）：
-            --//   "始终" → 绑定后一直挂在面板里；
-            --//   "切换" → 打开时出现，关闭时消失；
-            --//   "按住" → 只有按住该键的那段时间出现；
-            --//   "按下" → 同「按住」，按一下闪一下。
-            --// 只保留一个硬开关：ShowInKeybindFrame = false 时永不进面板。
             ShowInKeybindFrame = Info.ShowInKeybindFrame ~= false;
         }
 
@@ -1394,8 +1450,6 @@ do
 
         local KeybindsToggle = {}
         do
-            --// 行高 / 字号 / 指示块尺寸一律按像素算，不掺 DPIScale，
-            --// 这样"条目高度"和"面板高度"用同一套单位，边框才不会被内容顶出去 \\--
             local RowBaseHeight = 19
             local LabelBaseTextSize = 14
             local LabelMinTextSize = 11
@@ -1439,8 +1493,6 @@ do
                 BorderColor3 = "OutlineColor";
             })
 
-            --// 文字挂在"整行"上而不是挂在 13px 的指示块里：宽度永远跟着面板走，
-            --// 面板缩窄时先缩字号、再截断，绝不会画到边框外面 \\--
             local KeybindsToggleLabel = Library:CreateLabel({
                 BackgroundTransparency = 1;
                 AnchorPoint = Vector2.new(0, 0.5);
@@ -1456,7 +1508,6 @@ do
                 Parent = KeybindsToggleContainer;
             })
 
-            --// 整行可点：点在文字上也能切状态，不再只有 170px 那一小条区域有反应 \\--
             local KeybindsToggleRegion = Library:Create("Frame", {
                 BackgroundTransparency = 1;
                 Size = UDim2.new(1, 0, 1, 0);
@@ -1482,7 +1533,6 @@ do
                 Library.RegistryMap[KeybindsToggleLabel].Properties.TextColor3 = State and "AccentColor" or "FontColor"
             end
 
-            --// 文字永远住在自己那一行里：先按可用宽度缩字号，缩到下限还放不下才截断 \\--
             function KeybindsToggle:FitText()
                 local Free = KeybindsToggleLabel.AbsoluteSize.X
 
@@ -1518,7 +1568,6 @@ do
                 return KeybindsToggleContainer.Size.Y.Offset
             end
 
-            --// 面板被拖动缩放时重新算一次字号，保证文字始终贴在自己行内 \\--
             KeybindsToggleContainer:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
                 KeybindsToggle:FitText()
             end)
@@ -1529,7 +1578,6 @@ do
                     return
                 end
 
-                --// 「始终」恒为真、「按住」是瞬时态，在面板里点它们没有意义；只有「切换」可点 \\--
                 if KeyPicker.Mode ~= "Toggle" then return end
                                         
                 if (Input.UserInputType == Enum.UserInputType.MouseButton1 and not Library:MouseIsOverOpenedFrame()) or Input.UserInputType == Enum.UserInputType.Touch then
@@ -1683,7 +1731,6 @@ do
 
             local State = KeyPicker:GetState()
 
-            --// 条目显隐只看「模式 + 状态 + 有没有绑定」，规则集中在 ShouldShowInKeybindFrame \\--
             local FrameVisible = KeyPicker:ShouldShowInKeybindFrame()
 
             if KeyPicker.SyncToggleState and ParentObj.Value ~= State then
@@ -1701,7 +1748,6 @@ do
 
             for _, Frame in next, Library.KeybindContainer:GetChildren() do
                 if Frame:IsA("Frame") and Frame.Visible then
-                    --// 行高向条目自己问，字号或行高变了面板会跟着长，不会把内容挤到框外 \\--
                     local RowHeight = Frame.Size.Y.Offset
                     YSize = YSize + (if RowHeight > 0 then RowHeight else 19)
 
@@ -1722,13 +1768,9 @@ do
 
             local AutoWidth = math.min(math.max(XSize + 10, 220), MaxWidthCap)
 
-            --// 这里不乘 DPIScale：行高是固定像素，一边乘一边不乘就会算出装不下内容的框
-            --// 26 = 标题 20 + 底部留白 4 + 边框 2
-            --// 上限夹死：条目再多也不会把面板顶成一条通天柱，超出的部分靠滚动查看 \\--
             local AutoHeight = math.clamp(YSize + 26, MinHeightCap, MaxHeightCap)
 
             if Library.KeybindFrameManual then
-                --// 用户手动缩放过后，只保证不小于内容所需尺寸，不再强制回写自动尺寸 \\--
                 Library.KeybindFrame.Size = UDim2.fromOffset(
                     math.clamp(Library.KeybindFrame.Size.X.Offset, AutoWidth, MaxWidthCap),
                     math.clamp(Library.KeybindFrame.Size.Y.Offset, AutoHeight, MaxHeightCap)
@@ -1740,7 +1782,6 @@ do
             UpdateMenuOuterPos()
         end
 
-        --// 该绑定键"此刻是否正被按住"：按住 / 按下两种模式共用 \\--
         local IsMomentarilyActive = function()
             local Key = KeyPicker.Value
 
@@ -1769,10 +1810,6 @@ do
             return InputService:IsKeyDown(KeyCode)
         end
 
-        --// 按键面板显示规则（唯一裁决点）：
-        --//   始终 → 绑定后常驻；
-        --//   切换 → 打开才显示，关闭即消失；
-        --//   按住 / 按下 → 只有按住该键期间显示。
         function KeyPicker:ShouldShowInKeybindFrame()
             if KeyPicker.ShowInKeybindFrame == false then
                 return false
@@ -1810,8 +1847,6 @@ do
             KeyPicker:Update()
         end
 
-        --// 旧接口垫片：老脚本里的 "Hidden" 转成 ShowInKeybindFrame = false，
-        --// "Always" / "Active" 两个旧策略已删除，一律按新模式自动显隐（不再报错）\\--
         function KeyPicker:SetKeybindFrameVisibility(Policy)
             KeyPicker:SetShowInKeybindFrame(Policy ~= "Hidden")
         end
@@ -2010,7 +2045,7 @@ do
         KeyPicker.Default = KeyPicker.Value
         KeyPicker.DefaultModifiers = table.clone(KeyPicker.Modifiers or {})
 
-        Library:AddSearchEntry(ParentObj.Groupbox, Info.Text or ParentObj.Text or "按键", "按键绑定", ParentObj.SearchAnchor or KeyPicker.DisplayFrame)
+        Library:AddSearchEntry(ParentObj.Groupbox, Info.Text or ParentObj.Text or "按键", "按键绑定", ParentObj.SearchAnchor or KeyPicker.DisplayFrame, Idx)
 
         Options[Idx] = KeyPicker
 
@@ -2063,10 +2098,8 @@ do
 
         ColorPicker:SetHSVFromRGB(ColorPicker.Value)
 
-        --// 底栏改成"贴底锚定"：十六进制 / RGB 这一行距底边固定，透明度条再往下让一条
-        --// 这样默认尺寸下的像素位置与原版完全一致（253 高时行顶 = 228），拉大面板时色板长、底栏不动 \\--
-        local PickerRowBottomOffset = if Info.Transparency then 43 else 25 -- 底边 → 十六进制行顶部
-        local PickerMapBottomOffset = PickerRowBottomOffset + 28            -- 底边 → 色板底部（行高 20 + 间距 3 + 下边距 5）
+        local PickerRowBottomOffset = if Info.Transparency then 43 else 25
+        local PickerMapBottomOffset = PickerRowBottomOffset + 28
 
         local DisplayFrame = Library:Create("Frame", {
             BackgroundColor3 = ColorPicker.Value;
@@ -2097,13 +2130,10 @@ do
             Parent = ScreenGui,
         })
 
-        --// 位置跟着色块走（原版行为）：色块动，弹窗就跟着动 \\--
         DisplayFrame:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
             PickerFrameOuter.Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18)
         end)
 
-        --// 尺寸可拉：默认就是原版 230×253，右下角拖拽后由用户自己定
-        --// MinSize/MaxSize 与 Instance.Size 走同一套"实际像素"单位，避免 DPIScale ≠ 1 时第一次拖拽跳变 \\--
         local PickerDefaultSize = Vector2.new(230 * DPIScale, (if Info.Transparency then 271 else 253) * DPIScale)
 
         function ColorPicker:ResetSize()
@@ -2446,7 +2476,6 @@ do
                 Library:Notify("已复制 RGB 到剪贴板！", 2)
             end)
 
-            --// 拉变形之后，右键一键回到原版尺寸 \\--
             ContextMenu:AddOption("重置大小", function()
                 ColorPicker:ResetSize()
                 ContextMenu:Hide()
@@ -2506,8 +2535,6 @@ do
         end
 
         function ColorPicker:Show()
-            --// 先把要关的收集起来再关：边遍历边删表项会漏掉元素，
-            --// 漏掉的那个取色器就永远留在屏幕上跟后面打开的那个抢点击 \\--
             local Stale = {}
 
             for Frame in next, Library.OpenedFrames do
@@ -2521,8 +2548,6 @@ do
                 Library.OpenedFrames[Frame] = nil
             end
 
-            --// 打开时再对一次坐标：色块刚从折叠分组里展开/菜单刚被拖过时，
-            --// AbsolutePosition 的信号可能还没到，这里补一次保证落在色块下方 \\--
             PickerFrameOuter.Position = UDim2.fromOffset(DisplayFrame.AbsolutePosition.X, DisplayFrame.AbsolutePosition.Y + 18)
 
             PickerFrameOuter.Visible = true
@@ -2579,7 +2604,6 @@ do
             ColorPicker:Display()
         end)
 
-        --// 统一拖拽：按下后每帧按指针位置取样，拖出控件也继续跟手；游标本身也参与，避免点到游标点不动 \\--
         local function TrackDrag(Targets, OnMove)
             for _, Target in next, Targets do
                 Target.InputBegan:Connect(function(Input)
@@ -2671,9 +2695,6 @@ do
             end
 
             if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
-                --// 判断"点在哪"改用命中测试：弹窗现在贴在菜单外侧，
-                --// 原来的绝对坐标比较会把"点自己色块把它打开"的那一次点击也算成点在外面，
-                --// 于是刚开就被自己关掉 —— 这就是连着放几个取色器、前两个怎么点都不弹的原因 \\--
                 if PickerFrameOuter.Visible
                     and not Library:MouseIsOverFrame(PickerFrameOuter, Input)
                     and not Library:MouseIsOverFrame(DisplayFrame, Input) then
@@ -2698,7 +2719,7 @@ do
 
         ColorPicker.Default = ColorPicker.Value
 
-        Library:AddSearchEntry(ParentObj.Groupbox, ColorPicker.Title, "颜色选择器", ParentObj.SearchAnchor or DisplayFrame)
+        Library:AddSearchEntry(ParentObj.Groupbox, ColorPicker.Title, "颜色选择器", ParentObj.SearchAnchor or DisplayFrame, Idx)
 
         Options[Idx] = ColorPicker
 
@@ -2724,7 +2745,7 @@ do
             warn(string.format("AddDropdown (IDX: %s): Missing default value, selected the first index instead. Pass `AllowNull` as true if this was intentional.", tostring(Idx)))
         end
 
-        Info.Searchable = if typeof(Info.Searchable) == "boolean" then Info.Searchable else false
+        Info.Searchable = if typeof(Info.Searchable) == "boolean" then Info.Searchable else (#Info.Values >= 10)
         Info.FormatDisplayValue = if typeof(Info.FormatDisplayValue) == "function" then Info.FormatDisplayValue else nil
         Info.FormatListValue = if typeof(Info.FormatListValue) == "function" then Info.FormatListValue else nil
 
@@ -2998,8 +3019,14 @@ do
 
             for Idx, Value in next, Values do
                 local StringValue = tostring(Info.FormatListValue and Info.FormatListValue(Value) or Value)
-                if Info.Searchable and not string.lower(StringValue):match(string.lower(DropdownInnerSearch.Text)) then
-                    continue
+                local SearchTokens = SplitSearchTokens(DropdownInnerSearch.Text)
+
+                if Info.Searchable and #SearchTokens > 0 then
+                    local SearchHaystack = BuildHaystack(StringValue, Info.FormatDisplayValue and Info.FormatDisplayValue(Value) or "", Value)
+
+                    if not MatchesTokens(SearchHaystack, SearchTokens) then
+                        continue
+                    end
                 end
 
                 local IsDisabled = table.find(DisabledValues, StringValue)
@@ -3112,10 +3139,34 @@ do
                 Buttons[Button] = Table
             end
             
+            if Count == 0 and Info.Searchable and DropdownInnerSearch.Text ~= "" then
+                Count = 1
+
+                local NoMatch = Library:CreateLabel({
+                    Position = UDim2.new(0, 6, 0, 0);
+                    Size = UDim2.new(1, -12, 0, 20);
+                    Text = "没有匹配项";
+                    TextSize = 14;
+                    TextXAlignment = Enum.TextXAlignment.Left;
+                    ZIndex = 23;
+                    Parent = Scrolling;
+                })
+
+                if Library.RegistryMap[NoMatch] then
+                    Library.RegistryMap[NoMatch].Properties.TextColor3 = nil
+                end
+
+                NoMatch.TextColor3 = Color3.fromRGB(150, 150, 150)
+            end
+
             Scrolling.CanvasSize = UDim2.fromOffset(0, (Count * (20 * DPIScale)) + 1)
 
             Scrolling.Visible = false
             Scrolling.Visible = true
+
+            if Info.Searchable and DropdownInnerSearch.Text ~= "" then
+                Scrolling.CanvasPosition = Vector2.new(0, 0)
+            end
 
             local Y = math.clamp(Count * (20 * DPIScale), 0, MAX_DROPDOWN_ITEMS * (20 * DPIScale)) + 1
             RecalculateListSize(Y)
@@ -3353,7 +3404,7 @@ do
         Dropdown.Default = Defaults
         Dropdown.DefaultValues = Dropdown.Values
 
-        Library:AddSearchEntry(ParentObj.Groupbox, Dropdown.Text or "下拉框", "下拉框", ParentObj.SearchAnchor or DropdownOuter)
+        Library:AddSearchEntry(ParentObj.Groupbox, Dropdown.Text or "下拉框", "下拉框", ParentObj.SearchAnchor or DropdownOuter, Idx)
 
         Options[Idx] = Dropdown
 
@@ -4090,7 +4141,7 @@ do
         Textbox.SearchAnchor = TextBoxOuter
 
         table.insert(Groupbox.Elements, Textbox)
-        Library:AddSearchEntry(Groupbox, Info.Text, "输入框", TextBoxOuter)
+        Library:AddSearchEntry(Groupbox, Info.Text, "输入框", TextBoxOuter, Idx)
         Options[Idx] = Textbox
 
         return Textbox
@@ -4317,7 +4368,7 @@ do
         Toggle.Default = Toggle.Value
 
         table.insert(Groupbox.Elements, Toggle)
-        Library:AddSearchEntry(Groupbox, Toggle.Text, "开关", ToggleContainer)
+        Library:AddSearchEntry(Groupbox, Toggle.Text, "开关", ToggleContainer, Idx)
         Toggles[Idx] = Toggle
 
         Library:UpdateDependencyBoxes()
@@ -4382,7 +4433,6 @@ do
             Parent = Container;
         })
 
-        --// 右上角数值输入：无底色无边框，右对齐贴着滑块末端，靠 1px 下划线提示"这里能改" \\--
         local SliderInput
         local SliderInputLine
         local InputHovering = false
@@ -4426,8 +4476,6 @@ do
                 Parent = SliderOuter;
             })
 
-            --// 下划线只垫在数字底下：宽度跟着当前文本实时量，数字短线就短，
-            --// 不会再拖一条 46px 的长尾巴压住滑块 \\--
             local LastMeasuredText
 
             local UpdateInputLineWidth = function()
@@ -4447,11 +4495,9 @@ do
                 SliderInputLine.Size = UDim2.new(0, math.clamp(Bounds.X + 3, 10, 46), 0, 1)
             end
 
-            --// 三种状态：常态灰字 + 极淡细线；悬停强调色；聚焦强调色 + 极淡底色 \\--
             RefreshInputLook = function()
                 local Active = SliderInput:IsFocused() or InputHovering
 
-                --// 只留下划线，输入框本体永远透明（聚焦时也不铺底色，避免出现长方形色块） \\--
                 SliderInput.BackgroundTransparency = 1
                 SliderInput.BackgroundColor3 = Library.AccentColor
 
@@ -4463,7 +4509,6 @@ do
                     elseif Active then Library.AccentColor
                     else Library.OutlineColor
 
-                --// 常态压到 0.35 透明度，只在悬停/聚焦时实心，平时不抢视线 \\--
                 SliderInputLine.BackgroundTransparency = if Slider.Disabled then 0.7
                     elseif Active then 0
                     else 0.35
@@ -4668,7 +4713,6 @@ do
             end
         end
 
-        --// 输入框提交：回车 / 失焦时解析、夹紧到 [Min, Max] 并触发回调 \\--
         if SliderInput then
             SliderInput.FocusLost:Connect(function()
                 if Slider.Disabled then
@@ -4808,7 +4852,7 @@ do
         Slider.SearchAnchor = SliderOuter
 
         table.insert(Groupbox.Elements, Slider)
-        Library:AddSearchEntry(Groupbox, Slider.Text, "滑块", SliderOuter)
+        Library:AddSearchEntry(Groupbox, Slider.Text, "滑块", SliderOuter, Idx)
         Options[Idx] = Slider
 
         return Slider
@@ -4833,7 +4877,7 @@ do
             warn(string.format("AddDropdown (IDX: %s): Missing default value, selected the first index instead. Pass `AllowNull` as true if this was intentional.", tostring(Idx)))
         end
         
-        Info.Searchable = if typeof(Info.Searchable) == "boolean" then Info.Searchable else false
+        Info.Searchable = if typeof(Info.Searchable) == "boolean" then Info.Searchable else (#Info.Values >= 10)
         Info.FormatDisplayValue = if typeof(Info.FormatDisplayValue) == "function" then Info.FormatDisplayValue else nil
         Info.FormatListValue = if typeof(Info.FormatListValue) == "function" then Info.FormatListValue else nil
 
@@ -5119,8 +5163,14 @@ do
             local Count = 0
             for Idx, Value in next, Values do
                 local StringValue = tostring(Info.FormatListValue and Info.FormatListValue(Value) or Value)
-                if Info.Searchable and not string.lower(StringValue):match(string.lower(DropdownInnerSearch.Text)) then
-                    continue
+                local SearchTokens = SplitSearchTokens(DropdownInnerSearch.Text)
+
+                if Info.Searchable and #SearchTokens > 0 then
+                    local SearchHaystack = BuildHaystack(StringValue, Info.FormatDisplayValue and Info.FormatDisplayValue(Value) or "", Value)
+
+                    if not MatchesTokens(SearchHaystack, SearchTokens) then
+                        continue
+                    end
                 end
 
                 local IsDisabled = table.find(DisabledValues, StringValue)
@@ -5227,10 +5277,34 @@ do
                 Buttons[Button] = Table
             end
 
+            if Count == 0 and Info.Searchable and DropdownInnerSearch.Text ~= "" then
+                Count = 1
+
+                local NoMatch = Library:CreateLabel({
+                    Position = UDim2.new(0, 6, 0, 0);
+                    Size = UDim2.new(1, -12, 0, 20);
+                    Text = "没有匹配项";
+                    TextSize = 14;
+                    TextXAlignment = Enum.TextXAlignment.Left;
+                    ZIndex = 23;
+                    Parent = Scrolling;
+                })
+
+                if Library.RegistryMap[NoMatch] then
+                    Library.RegistryMap[NoMatch].Properties.TextColor3 = nil
+                end
+
+                NoMatch.TextColor3 = Color3.fromRGB(150, 150, 150)
+            end
+
             Scrolling.CanvasSize = UDim2.fromOffset(0, (Count * (20 * DPIScale)) + 1)
 
             Scrolling.Visible = false
             Scrolling.Visible = true
+
+            if Info.Searchable and DropdownInnerSearch.Text ~= "" then
+                Scrolling.CanvasPosition = Vector2.new(0, 0)
+            end
 
             local Y = math.clamp(Count * (20 * DPIScale), 0, MAX_DROPDOWN_ITEMS * (20 * DPIScale)) + 1
             RecalculateListSize(Y)
@@ -5474,7 +5548,7 @@ do
         Dropdown.SearchAnchor = DropdownOuter
 
         table.insert(Groupbox.Elements, Dropdown)
-        Library:AddSearchEntry(Groupbox, Dropdown.Text or "下拉框", "下拉框", DropdownOuter)
+        Library:AddSearchEntry(Groupbox, Dropdown.Text or "下拉框", "下拉框", DropdownOuter, Idx)
         Options[Idx] = Dropdown
 
         return Dropdown
@@ -6357,7 +6431,6 @@ do
         BorderColor3 = Library.OutlineColor;
         BorderMode = Enum.BorderMode.Inset;
         Size = UDim2.new(1, 0, 1, 0);
-        --// 兜底：任何情况下内容都不许画到面板边框外面 \\--
         ClipsDescendants = true;
         ZIndex = 101;
         Parent = KeybindOuter;
@@ -6391,8 +6464,6 @@ do
     })
     Library:MakeDraggable(KeybindOuter)
 
-    --// 条目多了以后面板装不下：这里改成可滚动容器，
-    --// 超出部分滚动查看，而不是被裁掉（吞掉）\\--
     local KeybindContainer = Library:Create("ScrollingFrame", {
         BackgroundTransparency = 1;
         Size = UDim2.new(1, 0, 1, -20);
@@ -6423,7 +6494,6 @@ do
     Library.KeybindContainer = KeybindContainer
     Library:MakeDraggable(KeybindOuter)
 
-    --// 缩放范围：宽度 200~420、高度 44~420，避免把面板拖成一条线或盖满屏幕 \\--
     Library.KeybindFrameMinSize = Vector2.new(200, 44)
     Library.KeybindFrameMaxSize = Vector2.new(420, 420)
     Library.KeybindFrameManual = false
@@ -7027,13 +7097,15 @@ function Library:CreateWindow(...)
         --// 搜索结果弹层 \\--
         local ROW_HEIGHT = 34
         local MAX_ROWS = 6
+        local MAX_RESULTS = 200
+        local SEARCH_WIDTH = 288
 
         local SearchResults = Library:Create("Frame", {
             AnchorPoint = Vector2.new(1, 0);
             BackgroundColor3 = Library.MainColor;
             BorderSizePixel = 0;
             Position = UDim2.new(1, -7, 0, 24);
-            Size = UDim2.new(0, 240, 0, 0);
+            Size = UDim2.new(0, SEARCH_WIDTH, 0, 0);
             Visible = false;
             ZIndex = 6000;
             Parent = Inner;
@@ -7120,14 +7192,88 @@ function Library:CreateWindow(...)
             end)
         end
 
+        local function HasHiddenAncestor(Instance)
+            local Node = Instance
+
+            while Node and Node.Name ~= "TabFrame" do
+                if Node:IsA("GuiObject") and not Node.Visible then
+                    return true
+                end
+
+                Node = Node.Parent
+            end
+
+            return false
+        end
+
+        local function ResolveSection(Entry)
+            if Entry.Section then
+                return Entry.Section
+            end
+
+            if Entry.Groupbox then
+                return Entry.Groupbox.Section
+            end
+
+            return nil
+        end
+
+        local function BuildPath(Entry)
+            local Parts = { Entry.TabName }
+            local Section = ResolveSection(Entry)
+
+            if Section and Section.Name and Section.Name ~= "" then
+                table.insert(Parts, Section.Name)
+            end
+
+            if Entry.GroupName and Entry.GroupName ~= "" and Entry.Kind ~= "Groupbox" then
+                table.insert(Parts, Entry.GroupName)
+            end
+
+            local Text = table.concat(Parts, "  ›  ")
+
+            if Entry.Kind ~= "Element" and Entry.Type and Entry.Type ~= "" then
+                Text = Text .. "   ·  " .. Entry.Type
+            elseif Entry.Idx and Entry.Idx ~= "" then
+                Text = Text .. "   ·  " .. Entry.Idx
+            end
+
+            if Entry.Anchor and Entry.Anchor.Parent and HasHiddenAncestor(Entry.Anchor) then
+                Text = Text .. "   ·  当前隐藏"
+            end
+
+            return Text
+        end
+
         function Window:GoToSearchResult(Entry)
-            if not Entry then return end
-            if Entry.Tab and Entry.Tab.ShowTab then Entry.Tab:ShowTab() end
-            if Entry.SubShow then pcall(Entry.SubShow) end
+            if not Entry then
+                return
+            end
+
+            local Tab = Entry.Tab
+
+            if Tab and Tab.ShowTab then
+                Tab:ShowTab()
+            end
+
+            local Section = ResolveSection(Entry)
+
+            if Section and Tab and Tab.SelectSection and Tab.ActiveSection and Tab.ActiveSection[Section.Side] ~= Section then
+                Tab:SelectSection(Section)
+            end
+
+            if Entry.SubShow then
+                pcall(Entry.SubShow)
+            end
 
             task.defer(function()
                 task.wait()
-                ScrollTo(Entry.Side, Entry.Anchor)
+                task.wait()
+
+                if Entry.Side then
+                    ScrollTo(Entry.Side, Entry.Anchor)
+                end
+
                 task.wait(0.05)
                 BlinkFrame(Entry.Anchor)
             end)
@@ -7186,6 +7332,7 @@ function Library:CreateWindow(...)
                 BorderSizePixel = 0;
                 Text = "";
                 Size = UDim2.new(1, 0, 0, ROW_HEIGHT);
+                LayoutOrder = RowIndex;
                 ZIndex = 6002;
                 Parent = SearchList;
             })
@@ -7210,15 +7357,10 @@ function Library:CreateWindow(...)
                 Parent = Row;
             })
 
-            local PathText = Entry.TabName
-            if Entry.GroupName ~= "" then
-                PathText = PathText .. "  ›  " .. Entry.GroupName
-            end
-
             local PathLabel = Library:CreateLabel({
                 Position = UDim2.new(0, 10, 0, 18);
                 Size = UDim2.new(1, -16, 0, 12);
-                Text = PathText;
+                Text = BuildPath(Entry);
                 TextSize = 13;
                 TextXAlignment = Enum.TextXAlignment.Left;
                 ZIndex = 6003;
@@ -7266,45 +7408,133 @@ function Library:CreateWindow(...)
             Label.TextColor3 = Color3.fromRGB(150, 150, 150)
         end
 
+        local function ScoreEntry(Entry, Tokens)
+            if not MatchesTokens(Entry.Haystack, Tokens) then
+                return nil
+            end
+
+            local Name = Entry.Query
+            local First = Tokens[1]
+
+            if #Tokens == 1 and Name == First then
+                return 100
+            end
+
+            if #Tokens == 1 and string.sub(Name, 1, #First) == First then
+                return 80
+            end
+
+            if string.find(Name, First, 1, true) then
+                return 60
+            end
+
+            if Entry.Idx and Entry.Idx ~= "" and string.find(NormalizeText(Entry.Idx), First, 1, true) then
+                return 40
+            end
+
+            return 20
+        end
+
         local function RefreshResults()
             for _, Child in next, SearchList:GetChildren() do
-                if Child:IsA("TextButton") or Child:IsA("Frame") then Child:Destroy() end
+                if Child:IsA("TextButton") or Child:IsA("Frame") then
+                    Child:Destroy()
+                end
             end
+
             table.clear(CurrentRows)
             Selection = 0
 
-            local Query = string.lower(SearchBox.Text)
-            if Query == "" then
+            local Tokens = SplitSearchTokens(SearchBox.Text)
+
+            if #Tokens == 0 then
                 SearchResults.Visible = false
                 return
             end
 
-            local Count = 0
-            for _, Entry in next, Window.SearchIndex do
-                if Entry.Anchor and Entry.Anchor.Parent and string.find(Entry.Query, Query, 1, true) then
-                    Count = Count + 1
-                    table.insert(CurrentRows, CreateResultRow(Entry, Count))
-                    if Count >= 50 then break end
+            local Matched = {}
+
+            for Order, Entry in ipairs(Window.SearchIndex) do
+                if Entry.Anchor == nil or Entry.Anchor.Parent then
+                    local Score = ScoreEntry(Entry, Tokens)
+
+                    if Score then
+                        table.insert(Matched, { Entry = Entry; Score = Score; Order = Order })
+                    end
                 end
             end
 
-            if Count == 0 then
+            table.sort(Matched, function(A, B)
+                if A.Score ~= B.Score then
+                    return A.Score > B.Score
+                end
+
+                return A.Order < B.Order
+            end)
+
+            local Total = #Matched
+
+            if Total == 0 then
                 CreateNoResultsRow()
-                SearchResults.Size = UDim2.new(0, 240, 0, ROW_HEIGHT + 6)
+                SearchResults.Size = UDim2.new(0, SEARCH_WIDTH, 0, ROW_HEIGHT + 6)
                 SearchList.CanvasSize = UDim2.new(0, 0, 0, ROW_HEIGHT + 6)
                 SearchResults.Visible = true
                 return
             end
 
-            local Shown = math.min(Count, MAX_ROWS)
-            SearchResults.Size = UDim2.new(0, 240, 0, Shown * ROW_HEIGHT + 6)
-            SearchList.CanvasSize = UDim2.new(0, 0, 0, Count * ROW_HEIGHT + 6)
+            local Count = math.min(Total, MAX_RESULTS)
+
+            for Index = 1, Count do
+                table.insert(CurrentRows, CreateResultRow(Matched[Index].Entry, Index))
+            end
+
+            local Rows = Count
+
+            if Total > Count then
+                Rows = Rows + 1
+
+                local Notice = Library:CreateLabel({
+                    Position = UDim2.new(0, 10, 0, Count * ROW_HEIGHT);
+                    Size = UDim2.new(1, -16, 0, ROW_HEIGHT);
+                    Text = string.format("还有 %d 条未显示，补充关键词缩小范围", Total - Count);
+                    TextSize = 13;
+                    TextXAlignment = Enum.TextXAlignment.Left;
+                    LayoutOrder = Count + 1;
+                    ZIndex = 6003;
+                    Parent = SearchList;
+                })
+
+                if Library.RegistryMap[Notice] then
+                    Library.RegistryMap[Notice].Properties.TextColor3 = nil
+                end
+
+                Notice.TextColor3 = Color3.fromRGB(150, 150, 150)
+            end
+
+            local Shown = math.min(Rows, MAX_ROWS)
+            SearchResults.Size = UDim2.new(0, SEARCH_WIDTH, 0, Shown * ROW_HEIGHT + 6)
+            SearchList.CanvasSize = UDim2.new(0, 0, 0, Rows * ROW_HEIGHT + 6)
             SearchResults.Visible = true
 
             SetSelection(1)
         end
 
-        SearchBox:GetPropertyChangedSignal("Text"):Connect(RefreshResults)
+        local RefreshToken = 0
+
+        local function ScheduleRefresh()
+            RefreshToken = RefreshToken + 1
+            local Token = RefreshToken
+
+            task.delay(0.05, function()
+                if Token ~= RefreshToken or Library.Unloaded then
+                    return
+                end
+
+                RefreshResults()
+            end)
+        end
+
+        SearchBox:GetPropertyChangedSignal("Text"):Connect(ScheduleRefresh)
 
         SearchBox.Focused:Connect(function()
             if SearchBox.Text ~= "" then RefreshResults() end
@@ -8189,17 +8419,20 @@ do
             end)
         end
 
-        --// ── 侧栏分区（子标签）──
-        --// 每一列顶部可以多出一行小标签；点哪个标签，这一列就只显示那个分区里的分组框。
-        --// 一列完全不建分区时这一行不会出现，行为和原来完全一致。\\--
         local SectionBarHeight = 24
         local SectionBarGap = 6
 
         local function CreateSectionBar(XScale, XOffset)
-            local Bar = Library:Create("Frame", {
+            local Bar = Library:Create("ScrollingFrame", {
                 BackgroundTransparency = 1;
+                BorderSizePixel = 0;
                 Position = UDim2.new(XScale, XOffset, 0, 7);
                 Size = UDim2.new(0.5, -10, 0, SectionBarHeight);
+                CanvasSize = UDim2.new(0, 0, 0, 0);
+                AutomaticCanvasSize = Enum.AutomaticSize.XY;
+                ScrollingDirection = Enum.ScrollingDirection.X;
+                HorizontalScrollBarInset = Enum.ScrollBarInset.Always;
+                ScrollBarThickness = 0;
                 Visible = false;
                 ZIndex = 6;
                 Parent = TabFrame;
@@ -8227,8 +8460,6 @@ do
         Tab.LeftSectionBar = LeftSectionBar
         Tab.RightSectionBar = RightSectionBar
 
-        --// 先按"没有子标签"的基准坐标摆好，再看子标签条要不要占位整体下推。
-        --// 每次 Resize 都从基准重算，所以反复调用不会把偏移累加两次 \\--
         local function LayoutSide(Bar, Side, XScale, XOffset, BaseYOffset, BaseSizeYOffset)
             local Reserve = 0
 
@@ -8362,8 +8593,6 @@ do
                 TableType = "Groupbox";
             }
 
-            --// 分区里的分组框挂在同一个侧栏里，只靠 Visible 控制显隐，
-            --// 这样分区之间的切换不会打乱列内的堆叠顺序 \\--
             local ParentFrame = Info.ParentFrame or (Info.Side == 1 and LeftSide or RightSide)
 
             Tab.GroupboxCounter = (Tab.GroupboxCounter or 0) + 1
@@ -8408,7 +8637,6 @@ do
                 BackgroundColor3 = "AccentColor";
             })
 
-            --// 分组标题：字号明显大于控件文本，并用一条分隔线拉出层级 \\--
             local GroupboxTitleHeight = 28
 
             Library:CreateLabel({
@@ -8471,6 +8699,27 @@ do
 
             Tab.Groupboxes[Info.Name] = Groupbox
 
+            if Info.Name then
+                local CleanName = StripRichText(Info.Name)
+
+                if CleanName ~= "" then
+                    Library:AddSearchNode({
+                        Kind = "Groupbox";
+                        Name = CleanName;
+                        Query = NormalizeText(CleanName);
+                        Idx = "";
+                        Type = "分组框";
+                        Haystack = BuildHaystack(CleanName, "分组框", "groupbox");
+                        TabName = Tab.Name or "";
+                        GroupName = CleanName;
+                        Tab = Tab;
+                        Anchor = BoxOuter;
+                        Side = ParentFrame;
+                        Groupbox = Groupbox;
+                    })
+                end
+            end
+
             return Groupbox
         end
 
@@ -8482,9 +8731,6 @@ do
             return Tab:AddGroupbox({ Side = 2; Name = Name; })
         end
 
-        --// ── 分区（子标签）──
-        --// Tab:AddLeftSection("世界") 会在左列顶部生成一个「世界」小标签，
-        --// 之后 Section:AddGroupbox 建的所有分组框都只在这个标签被选中时显示。\\--
         function Tab:AddSection(Info)
             Info = Info or {}
 
@@ -8504,7 +8750,6 @@ do
                 TableType = "Section";
             }
 
-            --// 小标签按钮：选中时主色打底 + 底部一条强调线，和顶部主标签同一套视觉 \\--
             local Button = Library:Create("TextButton", {
                 BackgroundColor3 = Library.BackgroundColor;
                 BorderSizePixel = 0;
@@ -8555,8 +8800,6 @@ do
 
                 Button.BackgroundColor3 = if Section.Active then Library.MainColor else Library.BackgroundColor
 
-                --// 换主题时颜色从注册表重刷，这里把"用哪个颜色键"也一起换掉，
-                --// 否则换主题后选中态会被覆盖成未选中 \\--
                 if Library.RegistryMap[Button] then
                     Library.RegistryMap[Button].Properties.BackgroundColor3 = if Section.Active then "MainColor" else "BackgroundColor"
                 end
@@ -8615,6 +8858,20 @@ do
             table.insert(Tab.Sections[SectionSide], Section)
             table.insert(Tab.SectionOrder, Section)
 
+            Library:AddSearchNode({
+                Kind = "Section";
+                Name = Section.Name;
+                Query = NormalizeText(Section.Name);
+                Idx = "";
+                Type = "分区";
+                Haystack = BuildHaystack(Section.Name, "分区", "section");
+                TabName = Tab.Name or "";
+                GroupName = "";
+                Tab = Tab;
+                Section = Section;
+                Anchor = Button;
+            })
+
             Bar.Visible = true
             Tab:Resize()
 
@@ -8634,7 +8891,6 @@ do
         end
 
         function Tab:SelectSection(Section)
-            --// 也接受分区名：先找左列再找右列 \\--
             if typeof(Section) == "string" then
                 local Found
 
@@ -8909,6 +9165,19 @@ do
         end
 
         Window.Tabs[Name] = Tab
+
+        Library:AddSearchNode({
+            Kind = "Tab";
+            Name = Tab.Name;
+            Query = NormalizeText(Tab.Name);
+            Idx = "";
+            Type = "标签页";
+            Haystack = BuildHaystack(Tab.Name, "标签页", "tab");
+            TabName = Tab.Name;
+            GroupName = "";
+            Tab = Tab;
+            Window = Window;
+        })
         return Tab
     end
 
