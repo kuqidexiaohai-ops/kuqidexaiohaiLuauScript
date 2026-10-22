@@ -6237,7 +6237,7 @@ do
             BorderMode = Enum.BorderMode.Inset;
             Size = UDim2.new(1, 0, 0, 507 + 2);
             ZIndex = 2;
-            Parent = ParentGroupbox.Side == 1 and Tab.LeftSideFrame or Tab.RightSideFrame;
+            Parent = ParentGroupbox.ParentFrame or (ParentGroupbox.Side == 1 and Tab.LeftSideFrame or Tab.RightSideFrame);
         })
 
         Library:AddToRegistry(BoxOuter, {
@@ -8189,12 +8189,70 @@ do
             end)
         end
 
+        --// ── 侧栏分区（子标签）──
+        --// 每一列顶部可以多出一行小标签；点哪个标签，这一列就只显示那个分区里的分组框。
+        --// 一列完全不建分区时这一行不会出现，行为和原来完全一致。\\--
+        local SectionBarHeight = 24
+        local SectionBarGap = 6
+
+        local function CreateSectionBar(XScale, XOffset)
+            local Bar = Library:Create("Frame", {
+                BackgroundTransparency = 1;
+                Position = UDim2.new(XScale, XOffset, 0, 7);
+                Size = UDim2.new(0.5, -10, 0, SectionBarHeight);
+                Visible = false;
+                ZIndex = 6;
+                Parent = TabFrame;
+            })
+
+            Library:Create("UIListLayout", {
+                Padding = UDim.new(0, 4);
+                FillDirection = Enum.FillDirection.Horizontal;
+                SortOrder = Enum.SortOrder.LayoutOrder;
+                HorizontalAlignment = Enum.HorizontalAlignment.Left;
+                VerticalAlignment = Enum.VerticalAlignment.Center;
+                Parent = Bar;
+            })
+
+            return Bar
+        end
+
+        local LeftSectionBar = CreateSectionBar(0, 7)
+        local RightSectionBar = CreateSectionBar(0.5, 5)
+
+        Tab.Sections = { [1] = {}; [2] = {} }
+        Tab.SectionOrder = {}
+        Tab.ActiveSection = { [1] = nil; [2] = nil }
+        Tab.SectionBarHeight = SectionBarHeight
+        Tab.LeftSectionBar = LeftSectionBar
+        Tab.RightSectionBar = RightSectionBar
+
+        --// 先按"没有子标签"的基准坐标摆好，再看子标签条要不要占位整体下推。
+        --// 每次 Resize 都从基准重算，所以反复调用不会把偏移累加两次 \\--
+        local function LayoutSide(Bar, Side, XScale, XOffset, BaseYOffset, BaseSizeYOffset)
+            local Reserve = 0
+
+            if Bar and Bar.Visible then
+                Reserve = SectionBarHeight + SectionBarGap
+                Bar.Position = UDim2.new(XScale, XOffset, 0, BaseYOffset)
+                Bar.Size = UDim2.new(0.5, -10, 0, SectionBarHeight)
+            end
+
+            Side.Position = UDim2.new(XScale, XOffset, 0, BaseYOffset + Reserve)
+            Side.Size = UDim2.new(0.5, -10, 1, BaseSizeYOffset - Reserve)
+        end
+
+        Tab.LayoutSide = LayoutSide
+
         function Tab:Resize()
+            local BaseYOffset = 7
+            local BaseSizeYOffset = -14
+
             if TopBar.Visible == true then
                 local MaximumSize = math.floor(TabFrame.AbsoluteSize.Y / 3.25)
                 local Size = 27 + select(2, Library:GetTextBounds(TopBarTextLabel.Text, Library.Font, 14, Vector2.new(TopBarTextLabel.AbsoluteSize.X, math.huge)))
 
-                if Tab.WarningBox.LockSize == true and Size >= MaximumSize then 
+                if Tab.WarningBox.LockSize == true and Size >= MaximumSize then
                     Size = MaximumSize
                 end
 
@@ -8206,27 +8264,16 @@ do
 
                 TopBar.Size = UDim2.new(1, -13, 0, Size)
                 Size = Size + 10
-                
+
+                BaseSizeYOffset = -14 - Size
+
                 if TopBar.Position.Y.Offset > 0 then
-                    LeftSide.Position = UDim2.new(0, 7, 0, 7 + Size)
-                    LeftSide.Size = UDim2.new(0.5, -10, 1, -14 - Size)
-            
-                    RightSide.Position = UDim2.new(0.5, 5, 0, 7 + Size)
-                    RightSide.Size = UDim2.new(0.5, -10, 1, -14 - Size)
-                else
-                    LeftSide.Position = UDim2.new(0, 7, 0, 7)
-                    LeftSide.Size = UDim2.new(0.5, -10, 1, -14 - Size)
-            
-                    RightSide.Position = UDim2.new(0.5, 5, 0, 7)
-                    RightSide.Size = UDim2.new(0.5, -10, 1, -14 - Size)
+                    BaseYOffset = 7 + Size
                 end
-            else
-                LeftSide.Position = UDim2.new(0, 7, 0, 7)
-                LeftSide.Size = UDim2.new(0.5, -10, 1, -14)
-        
-                RightSide.Position = UDim2.new(0.5, 5, 0, 7)
-                RightSide.Size = UDim2.new(0.5, -10, 1, -14)
             end
+
+            LayoutSide(LeftSectionBar, LeftSide, 0, 7, BaseYOffset, BaseSizeYOffset)
+            LayoutSide(RightSectionBar, RightSide, 0.5, 5, BaseYOffset, BaseSizeYOffset)
         end
 
         function Tab:UpdateWarningBox(Info)
@@ -8315,13 +8362,20 @@ do
                 TableType = "Groupbox";
             }
 
+            --// 分区里的分组框挂在同一个侧栏里，只靠 Visible 控制显隐，
+            --// 这样分区之间的切换不会打乱列内的堆叠顺序 \\--
+            local ParentFrame = Info.ParentFrame or (Info.Side == 1 and LeftSide or RightSide)
+
+            Tab.GroupboxCounter = (Tab.GroupboxCounter or 0) + 1
+
             local BoxOuter = Library:Create("Frame", {
                 BackgroundColor3 = Library.BackgroundColor;
                 BorderColor3 = Library.OutlineColor;
                 BorderMode = Enum.BorderMode.Inset;
                 Size = UDim2.new(1, 0, 0, 507 + 2);
+                LayoutOrder = Tab.GroupboxCounter;
                 ZIndex = 2;
-                Parent = Info.Side == 1 and LeftSide or RightSide;
+                Parent = ParentFrame;
             })
 
             Library:AddToRegistry(BoxOuter, {
@@ -8408,6 +8462,8 @@ do
             end
 
             Groupbox.Container = Container
+            Groupbox.BoxOuter = BoxOuter
+            Groupbox.ParentFrame = ParentFrame
             setmetatable(Groupbox, BaseGroupbox)
 
             Groupbox:AddBlank(3)
@@ -8426,6 +8482,201 @@ do
             return Tab:AddGroupbox({ Side = 2; Name = Name; })
         end
 
+        --// ── 分区（子标签）──
+        --// Tab:AddLeftSection("世界") 会在左列顶部生成一个「世界」小标签，
+        --// 之后 Section:AddGroupbox 建的所有分组框都只在这个标签被选中时显示。\\--
+        function Tab:AddSection(Info)
+            Info = Info or {}
+
+            local SectionSide = if Info.Side == 2 then 2 else 1
+            local SideFrame = if SectionSide == 1 then LeftSide else RightSide
+            local Bar = if SectionSide == 1 then LeftSectionBar else RightSectionBar
+
+            Tab.SectionCounter = (Tab.SectionCounter or 0) + 1
+
+            local Section = {
+                Elements = {};
+                Boxes = {};
+                Name = Info.Name or (if SectionSide == 1 then "左分区" else "右分区");
+                Side = SectionSide;
+                Tab = Tab;
+                Active = false;
+                TableType = "Section";
+            }
+
+            --// 小标签按钮：选中时主色打底 + 底部一条强调线，和顶部主标签同一套视觉 \\--
+            local Button = Library:Create("TextButton", {
+                BackgroundColor3 = Library.BackgroundColor;
+                BorderSizePixel = 0;
+                AutoButtonColor = false;
+                Text = "";
+                Size = UDim2.new(0, Library:GetTextBounds(Section.Name, Library.Font, 13) + 18, 0, SectionBarHeight - 4);
+                LayoutOrder = Tab.SectionCounter;
+                ZIndex = 7;
+                Parent = Bar;
+            })
+
+            Library:AddToRegistry(Button, {
+                BackgroundColor3 = "BackgroundColor";
+            })
+
+            local ButtonLabel = Library:CreateLabel({
+                Size = UDim2.new(1, 0, 1, 0);
+                Text = Section.Name;
+                TextSize = 13;
+                TextXAlignment = Enum.TextXAlignment.Center;
+                ZIndex = 8;
+                Parent = Button;
+            })
+
+            local Underline = Library:Create("Frame", {
+                BackgroundColor3 = Library.AccentColor;
+                BorderSizePixel = 0;
+                Position = UDim2.new(0, 0, 1, -2);
+                Size = UDim2.new(1, 0, 0, 2);
+                Visible = false;
+                ZIndex = 9;
+                Parent = Button;
+            })
+
+            Library:AddToRegistry(Underline, {
+                BackgroundColor3 = "AccentColor";
+            })
+
+            function Section:SetActive(bool)
+                Section.Active = bool == true
+
+                for _, Box in next, Section.Boxes do
+                    Box.BoxOuter.Visible = Section.Active
+                end
+
+                Underline.Visible = Section.Active
+                ButtonLabel.TextTransparency = if Section.Active then 0 else 0.4
+
+                Button.BackgroundColor3 = if Section.Active then Library.MainColor else Library.BackgroundColor
+
+                --// 换主题时颜色从注册表重刷，这里把"用哪个颜色键"也一起换掉，
+                --// 否则换主题后选中态会被覆盖成未选中 \\--
+                if Library.RegistryMap[Button] then
+                    Library.RegistryMap[Button].Properties.BackgroundColor3 = if Section.Active then "MainColor" else "BackgroundColor"
+                end
+
+                if Section.Active then
+                    Section:Resize()
+                end
+            end
+
+            function Section:AddGroupbox(Name)
+                local Groupbox = Tab:AddGroupbox({
+                    Side = SectionSide;
+                    Name = Name;
+                    ParentFrame = SideFrame;
+                })
+
+                Groupbox.Section = Section
+                Groupbox.BoxOuter.Visible = Section.Active
+
+                table.insert(Section.Boxes, Groupbox)
+
+                return Groupbox
+            end
+
+            function Section:AddTabbox(Name)
+                local Tabbox = Tab:AddTabbox({
+                    Side = SectionSide;
+                    Name = Name;
+                    ParentFrame = SideFrame;
+                })
+
+                Tabbox.Section = Section
+                Tabbox.BoxOuter.Visible = Section.Active
+
+                table.insert(Section.Boxes, Tabbox)
+
+                return Tabbox
+            end
+
+            function Section:Resize()
+                for _, Box in next, Section.Boxes do
+                    if Box.Resize then
+                        Box:Resize()
+                    end
+                end
+            end
+
+            function Section:GetActive()
+                return Section.Active
+            end
+
+            Button.MouseButton1Click:Connect(function()
+                Tab:SelectSection(Section)
+            end)
+
+            table.insert(Tab.Sections[SectionSide], Section)
+            table.insert(Tab.SectionOrder, Section)
+
+            Bar.Visible = true
+            Tab:Resize()
+
+            if Tab.ActiveSection[SectionSide] == nil then
+                Tab:SelectSection(Section)
+            end
+
+            return Section
+        end
+
+        function Tab:AddLeftSection(Name)
+            return Tab:AddSection({ Side = 1; Name = Name; })
+        end
+
+        function Tab:AddRightSection(Name)
+            return Tab:AddSection({ Side = 2; Name = Name; })
+        end
+
+        function Tab:SelectSection(Section)
+            --// 也接受分区名：先找左列再找右列 \\--
+            if typeof(Section) == "string" then
+                local Found
+
+                for _, SectionSide in ipairs({ 1, 2 }) do
+                    for _, Candidate in ipairs(Tab.Sections[SectionSide]) do
+                        if Candidate.Name == Section then
+                            Found = Candidate
+                            break
+                        end
+                    end
+
+                    if Found then
+                        break
+                    end
+                end
+
+                Section = Found
+            end
+
+            if typeof(Section) ~= "table" or Section.TableType ~= "Section" then
+                return
+            end
+
+            Tab.ActiveSection[Section.Side] = Section
+
+            for _, Candidate in ipairs(Tab.Sections[Section.Side]) do
+                Candidate:SetActive(Candidate == Section)
+            end
+        end
+
+        function Tab:GetSections(Side)
+            if Side == nil then
+                return Tab.SectionOrder
+            end
+
+            return Tab.Sections[Side] or {}
+        end
+
+        function Tab:GetActiveSection(Side)
+            return Tab.ActiveSection[Side]
+        end
+
         function Tab:AddTabbox(Info)
             local ParentTab = Tab
             local TabboxSide = Info.Side
@@ -8433,13 +8684,18 @@ do
                 Tabs = {};
             }
 
+            local TabboxParentFrame = Info.ParentFrame or (Info.Side == 1 and LeftSide or RightSide)
+
+            Tab.GroupboxCounter = (Tab.GroupboxCounter or 0) + 1
+
             local BoxOuter = Library:Create("Frame", {
                 BackgroundColor3 = Library.BackgroundColor;
                 BorderColor3 = Library.OutlineColor;
                 BorderMode = Enum.BorderMode.Inset;
                 Size = UDim2.new(1, 0, 0, 0);
+                LayoutOrder = Tab.GroupboxCounter;
                 ZIndex = 2;
-                Parent = Info.Side == 1 and LeftSide or RightSide;
+                Parent = TabboxParentFrame;
             })
 
             Library:AddToRegistry(BoxOuter, {
@@ -8620,6 +8876,9 @@ do
 
                 return Tab
             end
+
+            Tabbox.BoxOuter = BoxOuter
+            Tabbox.ParentFrame = TabboxParentFrame
 
             Tab.Tabboxes[Info.Name or ""] = Tabbox
 
