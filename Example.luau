@@ -30,7 +30,13 @@ local Window = Library:CreateWindow({
 	UnlockMouseWhileOpen = true,
 	NotifySide = "Left",
 	TabPadding = 8,
-	MenuFadeTime = 0.2
+	MenuFadeTime = 0.2,
+	-- 顶栏搜索框（默认 true，不想用就写 false）
+	-- 它能搜到：控件文字 / 控件索引名（如 SecFov）/ 分组框名 / 分区名 / 标签页名 / 类型词（开关、滑块、下拉框…）
+	-- 支持空格分词（AND）：输入「玩家 高亮」只列出同时命中的项
+	-- 点结果或按回车会跳过去：自动切标签页、切分区，并滚动定位 + 闪一下目标
+	Searchbar = true,
+	SearchbarPlaceholder = "搜索控件 / 分组 / 页面"
 })
 
 -- 回调说明：
@@ -313,6 +319,10 @@ end)
 -- Groupbox:AddDropdown
 -- 参数：Idx, Info
 
+-- 下拉框搜索：
+-- 值超过 10 个时会自动出现搜索框（也可以显式传 Searchable = true / false 强制开关）
+-- 搜索同时匹配「列表里显示的文字」「FormatDisplayValue 显示值」「原始值」，也支持空格分词
+-- 过滤后会回到列表顶部；没有任何匹配时显示「没有匹配项」，不会是空白
 local DropdownGroupBox = Tabs.Main:AddRightGroupbox("下拉框")
 
 DropdownGroupBox:AddDropdown("MyDropdown", {
