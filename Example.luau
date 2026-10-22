@@ -43,6 +43,7 @@ local Tabs = {
 	-- 创建一个名为「主页面」的新标签页
 	Main = Window:AddTab("主页面"),
 	["界面设置"] = Window:AddTab("界面设置"),
+	["分区演示"] = Window:AddTab("分区演示"),
 }
 
 -- Groupbox 和 Tabbox 拥有相同的方法
@@ -712,6 +713,55 @@ KeybindGroup:AddSlider("DemoSliderInput", {
 	Suffix = "%",
 	-- AllowInput = false, -- 关掉右上角的数值输入框
 })
+
+--// ── 侧栏分区（子标签）演示 ──
+-- AddLeftSection / AddRightSection 会在那一列顶部生成一行小标签：
+-- 点哪个标签，那一列就只显示「那个分区里建的分组框」，其他分区的整体隐藏。
+-- 一列里完全不建分区时，这一行标签不会出现，行为和以前一模一样。
+local SectionTab = Tabs["分区演示"]
+
+-- 左列：两个分区（世界 / 玩家），点标签切换
+local WorldSection = SectionTab:AddLeftSection("世界")
+
+WorldSection:AddGroupbox("方块"):AddToggle("SecBlockToggle", { Text = "方块透视" })
+WorldSection:AddGroupbox("天空"):AddToggle("SecSkyToggle", { Text = "自定义天空" })
+
+local PlayerSection = SectionTab:AddLeftSection("玩家")
+
+PlayerSection:AddGroupbox("玩家"):AddToggle("SecPlayerToggle", { Text = "队友高亮" })
+PlayerSection:AddGroupbox("玩家样式"):AddSlider("SecPlayerSize", {
+	Text = "高亮粗细",
+	Default = 3,
+	Min = 1,
+	Max = 10,
+	Rounding = 0,
+})
+
+-- 右列：两个分区（相机 / 画面），同样可以塞多个分组框
+local CameraSection = SectionTab:AddRightSection("相机")
+
+CameraSection:AddGroupbox("相机"):AddSlider("SecFov", {
+	Text = "视野",
+	Default = 70,
+	Min = 40,
+	Max = 120,
+	Rounding = 0,
+})
+CameraSection:AddGroupbox("相机增强"):AddToggle("SecNoClip", { Text = "穿墙" })
+
+local VisualSection = SectionTab:AddRightSection("画面")
+
+VisualSection:AddGroupbox("画面"):AddToggle("SecBright", { Text = "去雾" })
+VisualSection:AddGroupbox("画质"):AddDropdown("SecQuality", {
+	Text = "画质",
+	Default = "高",
+	Values = { "低", "中", "高", "极高" },
+})
+
+-- 也可以用代码切分区：传分区名（左列优先）或分区对象本身
+VisualSection:AddGroupbox("切换"):AddButton("切到左列「世界」", function()
+	SectionTab:SelectSection("世界")
+end)
 
 -- 库函数
 -- 设置水印可见性
