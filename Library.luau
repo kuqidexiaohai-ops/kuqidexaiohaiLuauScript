@@ -3017,11 +3017,13 @@ do
             local Count = 0
             OpenedXSizeForList = DropdownOuter.AbsoluteSize.X + 0.5
 
+            local SearchTokens = if Info.Searchable and DropdownInnerSearch then SplitSearchTokens(DropdownInnerSearch.Text) else {}
+            local Searching = #SearchTokens > 0
+
             for Idx, Value in next, Values do
                 local StringValue = tostring(Info.FormatListValue and Info.FormatListValue(Value) or Value)
-                local SearchTokens = SplitSearchTokens(DropdownInnerSearch.Text)
 
-                if Info.Searchable and #SearchTokens > 0 then
+                if Searching then
                     local SearchHaystack = BuildHaystack(StringValue, Info.FormatDisplayValue and Info.FormatDisplayValue(Value) or "", Value)
 
                     if not MatchesTokens(SearchHaystack, SearchTokens) then
@@ -5161,11 +5163,13 @@ do
             end
 
             local Count = 0
+            local SearchTokens = if Info.Searchable and DropdownInnerSearch then SplitSearchTokens(DropdownInnerSearch.Text) else {}
+            local Searching = #SearchTokens > 0
+
             for Idx, Value in next, Values do
                 local StringValue = tostring(Info.FormatListValue and Info.FormatListValue(Value) or Value)
-                local SearchTokens = SplitSearchTokens(DropdownInnerSearch.Text)
 
-                if Info.Searchable and #SearchTokens > 0 then
+                if Searching then
                     local SearchHaystack = BuildHaystack(StringValue, Info.FormatDisplayValue and Info.FormatDisplayValue(Value) or "", Value)
 
                     if not MatchesTokens(SearchHaystack, SearchTokens) then
